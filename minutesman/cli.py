@@ -90,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     for noisy in ("httpx", "openai", "speechbrain", "urllib3", "filelock"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Keep the client's "Retrying request ..." lines so timeouts and retries are visible
+    logging.getLogger("openai._base_client").setLevel(logging.INFO)
 
     if args.cmd == "estimate":
         cfg.update(llm_model=args.llm_model, reasoning_effort=args.reasoning_effort)
