@@ -32,6 +32,16 @@ audio ─► ffmpeg enhance (gain first, mild denoise) ─► 10-min chunks, 30 
 * optional local ECAPA speaker embeddings (free, CPU)
 ```
 
+## Windows quick start
+
+1. Install Python 3.10+ from python.org and tick **"Add python.exe to PATH"**.
+2. Double-click **`setup.bat`** in the repo folder and paste your OpenAI API key when asked.
+3. **Drag your recording onto `transcribe.bat`.** It shows the cost estimate, transcribes, and opens
+   `output\<file name>\transcript.md` when done. If it stops midway, run it again: finished
+   steps are cached.
+
+Options still work from a terminal: `transcribe.bat "C:\path\to\file.m4a" --keywords "Ahmed,Sara"`.
+
 ## Setup
 
 Python 3.10+.
