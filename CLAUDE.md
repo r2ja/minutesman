@@ -70,6 +70,8 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
 - Progress: heartbeat every 30 s while waiting on API calls, per-chunk time + ETA in pass A, counters
   for pass B / fusion / voiceprints (`progress.py`). Pass A requests retry after 420 s (`pass_a_timeout`).
 - Ctrl+C: `cli._interruptible` runs the pipeline in a worker thread so Ctrl+C works on Windows mid-request.
-- First real run: chunks 1-2 took ~3.5 min each; chunk 3 hung past 8 min (before the timeout fix).
+- First real run: chunks took ~3.5-4 min each, but the diarize endpoint sometimes hangs (chunk 3 once,
+  chunk 5 twice). Pass A now hedges: after max(300 s, 1.5x typical chunk time) a second copy is sent and
+  the first to finish wins (`progress.hedged`). Cache entries record their chunk span.
 - Known leftovers: very short greetings can become their own flagged "Guest"; the person recording is
   often never named (nobody addresses them right before they speak); `--voice` clips fix both.

@@ -12,7 +12,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from . import asr, audio, llm, render, voiceprint
-from .progress import Counter, fmt, heartbeat
+from .progress import Counter, fmt, heartbeat, hedged
 from .config import LLM_PRICE_PER_1M, TRANSCRIBE_PRICE_PER_MIN, Settings
 from .models import Segment, Window
 from .speakers import SpeakerRegistry
@@ -71,13 +71,19 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         chunk_pcm = audio.slice_pcm(pcm, ch.start, ch.end)
         names, refs = registry.known_references()
         cached = cache.get(f"passA_{ch.index:03d}")
+        if cached and cached.get("span", [ch.start, ch.end]) != [ch.start, ch.end]:
+            cached = None  # chunk layout changed since this was cached
         if cached is None:
             log.info("Pass A: chunk %d/%d (%s known speaker refs)", ch.index + 1, len(chunks), len(names))
             t_chunk = time.time()
+            mp3 = audio.pcm_to_mp3_bytes(chunk_pcm)
+            # Normal chunks take ~4 min; hedge at 1.5x the typical time seen so far
+            typical = sorted(sent_seconds)[len(sent_seconds) // 2] if sent_seconds else 240.0
             with heartbeat(f"pass A chunk {ch.index + 1}/{len(chunks)}"):
-                segs = asr.diarize_chunk(client, cfg, audio.pcm_to_mp3_bytes(chunk_pcm), ch.index,
-                                         ch.start, names, refs)
-            cache.put(f"passA_{ch.index:03d}", {"referenced": names, "segments": [asdict(s) for s in segs]})
+                segs = hedged(lambda: asr.diarize_chunk(client, cfg, mp3, ch.index, ch.start, names, refs),
+                              max(cfg.hedge_min_seconds, 1.5 * typical), f"Pass A chunk {ch.index + 1}")
+            cache.put(f"passA_{ch.index:03d}", {"span": [ch.start, ch.end], "referenced": names,
+                                                "segments": [asdict(s) for s in segs]})
             minutes_a += (ch.end - ch.start) / 60  # billed only when actually sent
             sent_seconds.append(time.time() - t_chunk)
             left = len(chunks) - ch.index - 1

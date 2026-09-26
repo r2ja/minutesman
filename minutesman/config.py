@@ -62,7 +62,8 @@ class Settings:
     window_seconds: int = 90  # pass-B window length
     max_known_speakers: int = 4  # API limit for known_speaker_references
     concurrency: int = 4
-    pass_a_timeout: int = 420  # seconds per diarization request before retrying
+    pass_a_timeout: int = 600  # seconds per diarization request before the client retries it
+    hedge_min_seconds: int = 300  # never send a second copy of a chunk before this
 
     # Minimum naming confidence to publish a real name instead of "Guest N"
     name_threshold: float = 0.75

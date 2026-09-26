@@ -257,3 +257,31 @@ def test_weak_second_name_does_not_split():
                llm.SpeakerName(speaker=sp.id, meeting=1, name="Ayesha", confidence=0.4, evidence="")]
     best = pipeline.resolve_names(segs, [sp], entries, {0: 0, 1: 1, -1: -1}, reg, 0.75)
     assert segs[1].speaker == sp.id and best[sp.id].name == "Sara"
+
+
+def test_hedged_request_takes_the_faster_copy():
+    import time
+    from minutesman.progress import hedged
+
+    calls = []
+
+    def call():
+        calls.append(1)
+        time.sleep(2 if len(calls) == 1 else 0.1)
+        return len(calls)
+
+    assert hedged(call, 0.3, "t") == 2
+
+
+def test_old_cache_without_span_is_still_used(tmp_path, meeting):
+    import json as js
+
+    src, _ = meeting
+    pipeline.run(src, tmp_path / "out", cfg(), client=FakeClient())
+    for f in (tmp_path / "out" / "work" / "cache").glob("passA_*.json"):
+        d = js.loads(f.read_text())
+        d.pop("span")
+        f.write_text(js.dumps(d))
+    again = FakeClient()
+    pipeline.run(src, tmp_path / "out", cfg(), client=again)
+    assert not any(c["model"].endswith("diarize") for c in again.audio.transcriptions.calls)
