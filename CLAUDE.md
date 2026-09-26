@@ -58,11 +58,10 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
 
 ## Current state
 
-- First real run ("Systems limited.m4a", 109.4 min, 12 chunks, estimate $2.82): after the streaming fix all
-  chunks ran steadily at ~4.5 min each. Pass A, voiceprints (1006 segments, ~5 min CPU), pass B (81 windows,
-  ~1 min) and 10/12 fusion chunks finished, then the OpenAI account ran out of credits. Everything finished
-  is cached; ~$0.50 of work remains (2 fusion chunks + analysis). The diarizer produced ~35 ids across chunks
-  and voiceprints added 14 more: check for too many Guests / over-splitting when reviewing.
+- First real run ("Systems limited.m4a", 109.4 min, 12 chunks) completed 2026-09-26 21:02 PKT after the
+  streaming fix and a credit top-up. Pass A ~4.5 min per chunk once streamed; voiceprints 1006 segments in
+  ~11 min CPU (cached now), 25 voice groups, 314 segments moved, 14 extra speakers; analysis over 1746
+  segments took ~30 s. Output in output/Systems limited.m4a/. Not yet reviewed: likely too many speakers.
 - Voiceprint embeddings are cached in work/cache/voiceprints.npz; per-segment moves log at DEBUG only.
 
 ## Next steps / open ideas
