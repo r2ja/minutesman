@@ -69,15 +69,38 @@ class FakeTranscriptions:
             for a, b in bursts(pcm):
                 who = pitch(audio.slice_pcm(pcm, a, b))
                 label = known.get(who) or letters.setdefault(who, string.ascii_uppercase[len(letters)])
-                segs.append(SimpleNamespace(speaker=label, start=a, end=b, text=f"{who} bolta hai"))
+                segs.append(SimpleNamespace(type="transcript.text.segment", speaker=label, start=a, end=b,
+                                            text=f"{who} bolta hai"))
+            if kw.get("stream"):
+                return iter(segs + [SimpleNamespace(type="transcript.text.done", text="")])
             return SimpleNamespace(segments=segs)
         who = [pitch(audio.slice_pcm(pcm, a, b)) for a, b in bursts(pcm)]
         return SimpleNamespace(text=" ".join(f"{w} says" for w in who), languages=[{"code": "ur"}])
 
 
+class _Stream:
+    def __init__(self, resp):
+        self.resp = resp
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def __iter__(self):
+        return iter([SimpleNamespace(type="response.output_text.delta")])
+
+    def get_final_response(self):
+        return self.resp
+
+
 class FakeResponses:
     def __init__(self):
         self.calls = 0
+
+    def stream(self, **kw):
+        return _Stream(self.parse(**kw))
 
     def parse(self, model, input, text_format, **kw):
         self.calls += 1

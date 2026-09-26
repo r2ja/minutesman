@@ -11,6 +11,8 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from .net import make_client
+
 from . import asr, audio, llm, render, voiceprint
 from .progress import Counter, fmt, heartbeat, hedged
 from .config import LLM_PRICE_PER_1M, TRANSCRIBE_PRICE_PER_MIN, Settings
@@ -39,7 +41,7 @@ class _Cache:
 def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None = None,
         fresh: bool = False, client: OpenAI | None = None) -> Path:
     t0 = time.time()
-    client = client or OpenAI(max_retries=5, timeout=900)
+    client = client or make_client()
     work = out_dir / "work"
     if fresh and work.exists():
         shutil.rmtree(work)
@@ -79,8 +81,16 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
             mp3 = audio.pcm_to_mp3_bytes(chunk_pcm)
             # Normal chunks take ~4 min; hedge at 1.5x the typical time seen so far
             typical = sorted(sent_seconds)[len(sent_seconds) // 2] if sent_seconds else 240.0
-            with heartbeat(f"pass A chunk {ch.index + 1}/{len(chunks)}"):
-                segs = hedged(lambda: asr.diarize_chunk(client, cfg, mp3, ch.index, ch.start, names, refs),
+            heard = {"end": ch.start}
+
+            def seen(t, heard=heard, start=ch.start):
+                heard["end"] = max(heard["end"], start + t)
+
+            def status(heard=heard, ch=ch):
+                return f"heard up to {fmt(heard['end'] - ch.start)} of {fmt(ch.end - ch.start)}"
+
+            with heartbeat(f"pass A chunk {ch.index + 1}/{len(chunks)}", status=status):
+                segs = hedged(lambda: asr.diarize_chunk(client, cfg, mp3, ch.index, ch.start, names, refs, seen),
                               max(cfg.hedge_min_seconds, 1.5 * typical), f"Pass A chunk {ch.index + 1}")
             cache.put(f"passA_{ch.index:03d}", {"span": [ch.start, ch.end], "referenced": names,
                                                 "segments": [asdict(s) for s in segs]})

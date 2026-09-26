@@ -11,15 +11,16 @@ log = logging.getLogger("minutesman")
 HEARTBEAT_SECONDS = 30
 
 
-# Log "still waiting" every HEARTBEAT_SECONDS until the block finishes
+# Log "still waiting" every HEARTBEAT_SECONDS until the block finishes; status() adds live detail
 @contextmanager
-def heartbeat(label: str, every: float = HEARTBEAT_SECONDS):
+def heartbeat(label: str, every: float = HEARTBEAT_SECONDS, status=None):
     start = time.time()
     done = threading.Event()
 
     def beat():
         while not done.wait(every):
-            log.info("  ... still waiting on %s (%s)", label, fmt(time.time() - start))
+            extra = f", {status()}" if status else ""
+            log.info("  ... still waiting on %s (%s%s)", label, fmt(time.time() - start), extra)
 
     t = threading.Thread(target=beat, daemon=True)
     t.start()

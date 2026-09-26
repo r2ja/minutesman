@@ -170,9 +170,9 @@ def check(cfg: Settings) -> int:
     if not os.environ.get("OPENAI_API_KEY"):
         print("OPENAI_API_KEY: missing (put it in .env or your environment)")
         return 1
-    from openai import OpenAI
+    from .net import make_client
 
-    client = OpenAI(max_retries=0)
+    client = make_client(max_retries=0)
     try:
         have = {m.id for m in client.models.list()}
     except Exception as exc:  # noqa: BLE001

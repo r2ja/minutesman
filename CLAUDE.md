@@ -67,11 +67,14 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
   spelling. Tune voiceprint thresholds (`LINK_THRESHOLD`, `PRIOR_BONUS`) and `name_threshold` on real audio.
 - Speed: pass A is the bottleneck (sequential because of rolling speaker references). Option: run chunks in
   parallel without references and rely on overlap voting + voiceprints; measure accuracy before switching.
-- Progress: heartbeat every 30 s while waiting on API calls, per-chunk time + ETA in pass A, counters
-  for pass B / fusion / voiceprints (`progress.py`). Pass A requests retry after 420 s (`pass_a_timeout`).
+- Progress: heartbeat every 30 s while waiting on API calls ("heard up to m:ss of 10:30" in pass A),
+  per-chunk time + ETA, counters for pass B / fusion / voiceprints (`progress.py`).
 - Ctrl+C: `cli._interruptible` runs the pipeline in a worker thread so Ctrl+C works on Windows mid-request.
-- First real run: chunks took ~3.5-4 min each, but the diarize endpoint sometimes hangs (chunk 3 once,
-  chunk 5 twice). Pass A now hedges: after max(300 s, 1.5x typical chunk time) a second copy is sent and
-  the first to finish wins (`progress.hedged`). Cache entries record their chunk span.
+- Hang root cause (first real run): every non-streamed request that finished got back in under ~4 min;
+  every one that would take longer never returned (chunk 3 once, chunk 5 twice). A ~4 min idle-connection
+  cutoff on the path (Azure LB default / home router) drops silent connections. Fix: pass A and all LLM
+  calls now STREAM (diarize emits transcript.text.segment events every few seconds), all connections use
+  TCP keepalive (`net.make_client`), and timeouts are "no data for 240 s" instead of a total time.
+  Hedging (`progress.hedged`) stays as a backstop. Cache entries record their chunk span.
 - Known leftovers: very short greetings can become their own flagged "Guest"; the person recording is
   often never named (nobody addresses them right before they speak); `--voice` clips fix both.

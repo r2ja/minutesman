@@ -118,12 +118,16 @@ def _parse(client: OpenAI, cfg: Settings, system: str, user: str, schema, usage:
     kwargs = {}
     if cfg.reasoning_effort and cfg.reasoning_effort != "none":
         kwargs["reasoning"] = {"effort": cfg.reasoning_effort}
-    resp = client.responses.parse(
+    # Streamed so long reasoning calls keep the connection busy
+    with client.responses.stream(
         model=cfg.llm_model,
         input=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         text_format=schema,
         **kwargs,
-    )
+    ) as stream:
+        for _ in stream:
+            pass
+        resp = stream.get_final_response()
     usage.add(resp)
     if resp.output_parsed is None:
         raise RuntimeError(f"{cfg.llm_model} returned no parsable output")

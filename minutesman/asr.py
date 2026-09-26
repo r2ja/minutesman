@@ -25,22 +25,29 @@ def _prompt_safe(text: str, limit: int = 900) -> str:
     return re.sub(r"\s+", " ", text).strip()[-limit:]
 
 
+# Streams segments as the server finishes them, so the connection never sits idle and progress is visible
 def diarize_chunk(client: OpenAI, cfg: Settings, mp3: bytes, chunk_index: int, offset: float,
-                  known_names: list[str], known_refs: list[str]) -> list[Segment]:
+                  known_names: list[str], known_refs: list[str], on_progress=None) -> list[Segment]:
     kwargs = {}
     if known_names:
         kwargs["known_speaker_names"] = known_names
         kwargs["known_speaker_references"] = known_refs
-    # A 10-min chunk normally takes ~3-4 min; give up and retry sooner than the client default
-    resp = client.with_options(timeout=cfg.pass_a_timeout).audio.transcriptions.create(
+    stream = client.audio.transcriptions.create(
         model=cfg.diarize_model,
         file=(f"chunk{chunk_index:03d}.mp3", io.BytesIO(mp3), "audio/mpeg"),
         response_format="diarized_json",
         chunking_strategy="auto",
+        stream=True,
         **kwargs,
     )
+    raw = []
+    for ev in stream:
+        if _field(ev, "type") == "transcript.text.segment":
+            raw.append(ev)
+            if on_progress:
+                on_progress(float(_field(ev, "end", 0.0)))
     segs = []
-    for i, s in enumerate(_field(resp, "segments", []) or []):
+    for i, s in enumerate(raw):
         text = (_field(s, "text", "") or "").strip()
         if not text:
             continue

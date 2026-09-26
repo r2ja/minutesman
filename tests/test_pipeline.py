@@ -217,10 +217,11 @@ def test_two_meetings_end_to_end(tmp_path):
 
             def create(*a, **kw):
                 r = orig(*a, **kw)
-                for s in getattr(r, "segments", []):
-                    if s.text.startswith("ayesha") and s.start < 30:
+                events = list(r) if kw.get("stream") else getattr(r, "segments", [])
+                for s in events:
+                    if getattr(s, "text", "").startswith("ayesha") and s.start < 30:
                         s.text = "ayesha salam everyone"
-                return r
+                return iter(events) if kw.get("stream") else r
             self.audio.transcriptions.create = create
 
     out = pipeline.run(src, tmp_path / "out", cfg().update(chunk_seconds=600), client=Salam())
