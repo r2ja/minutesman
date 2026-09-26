@@ -79,10 +79,10 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
             segs = asr.diarize_chunk(client, cfg, audio.pcm_to_mp3_bytes(chunk_pcm), ch.index,
                                      ch.start, names, refs)
             cache.put(f"passA_{ch.index:03d}", {"referenced": names, "segments": [asdict(s) for s in segs]})
+            minutes_a += (ch.end - ch.start) / 60  # billed only when actually sent
         else:
             names = cached["referenced"]
             segs = [Segment(**s) for s in cached["segments"]]
-        minutes_a += (ch.end - ch.start) / 60
         registry.link_chunk(ch.index, segs, per_chunk[-1] if per_chunk else [], names)
         registry.absorb(segs, chunk_pcm, ch.start)
         per_chunk.append(segs)
@@ -112,20 +112,20 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
                                     cfg.window_seconds, len(windows))
     prev_text = {w.id: " ".join(s.text_a for s in segments if s.window == w.id - 1)[-300:] for w in windows}
 
-    def pass_b(w: Window) -> Window:
+    def pass_b(w: Window) -> float:
+        """Returns the billed minutes (0 when served from cache)."""
         cached = cache.get(f"passB_{w.id:04d}")
         if cached and cached["start"] == w.start and cached["end"] == w.end:
             w.text_b, w.languages = cached["text_b"], cached["languages"]
-            return w
+            return 0.0
         clip = audio.slice_pcm(pcm, w.start - WINDOW_PAD, w.end + WINDOW_PAD)
         asr.transcribe_window(client, cfg, audio.pcm_to_mp3_bytes(clip), w, prev_text[w.id])
         cache.put(f"passB_{w.id:04d}", asdict(w))
-        return w
+        return (w.end - w.start + 2 * WINDOW_PAD) / 60
 
     log.info("Pass B: %d windows", len(windows))
     with ThreadPoolExecutor(cfg.concurrency) as pool:
-        list(pool.map(pass_b, windows))
-    minutes_b = sum(w.end - w.start + 2 * WINDOW_PAD for w in windows) / 60
+        minutes_b = sum(pool.map(pass_b, windows))
 
     # 6. LLM fusion per chunk, in parallel ------------------------------------------------
     usage = llm.Usage()
@@ -192,7 +192,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         minutes_a * TRANSCRIBE_PRICE_PER_MIN.get(cfg.diarize_model, 0.006)
         + minutes_b * TRANSCRIBE_PRICE_PER_MIN.get(cfg.transcribe_model, 0.006)
         + llm_cost(cfg.llm_model, usage.input, usage.cached, usage.output), 4)
-    cost["note"] = "LLM tokens count only calls made in this run (cached stages are free)."
+    cost["note"] = "Counts only API calls made in this run; stages served from cache cost nothing."
     meta = {
         "source": str(src), "duration_seconds": round(total, 1), "settings": asdict(cfg),
         "voiceprints": cfg.voiceprints and voiceprint.available(), "cost": cost,

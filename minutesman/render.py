@@ -20,17 +20,21 @@ def ts(seconds: float, srt: bool = False) -> str:
 
 
 def turns(segments: list[Segment], max_gap: float = 2.0) -> list[dict]:
-    """Merge consecutive segments by the same speaker into readable turns."""
+    """Merge consecutive segments by the same speaker into readable turns. A doubtful
+    segment never merges with a confident one, so its ⚠ isn't averaged away."""
     out: list[dict] = []
+    prev_low = False
     for s in segments:
         last = out[-1] if out else None
-        if last and last["speaker"] == s.speaker and s.start - last["end"] <= max_gap:
+        low = s.confidence < LOW_CONFIDENCE
+        if last and last["speaker"] == s.speaker and s.start - last["end"] <= max_gap and low == prev_low:
             last["end"] = s.end
             last["texts"].append(s.text)
             last["confs"].append((s.confidence, s.duration))
         else:
             out.append({"speaker": s.speaker, "start": s.start, "end": s.end,
                         "texts": [s.text], "confs": [(s.confidence, s.duration)]})
+        prev_low = low
     for t in out:
         w = sum(d for _, d in t["confs"]) or 1.0
         t["confidence"] = round(sum(c * d for c, d in t["confs"]) / w, 2)

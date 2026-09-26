@@ -68,8 +68,9 @@ def test_cache_avoids_repeat_api_calls(tmp_path, meeting):
     src, _ = meeting
     pipeline.run(src, tmp_path / "out", cfg(), client=FakeClient())
     again = FakeClient()
-    pipeline.run(src, tmp_path / "out", cfg(), client=again)
+    out = pipeline.run(src, tmp_path / "out", cfg(), client=again)
     assert again.audio.transcriptions.calls == [] and again.responses.calls == 0
+    assert load(out)["meta"]["cost"]["usd"] == 0
 
 
 def test_enrolled_voice_gets_name(tmp_path, meeting):
@@ -167,3 +168,14 @@ def test_evaluate_scores_speakers_and_text():
                         {"speaker": "S1", "start": 5, "end": 9, "text": "okay done"}]}
     r = evaluate(run, truth)
     assert r["cer"] == 0.0 and r["turns_correct"] == "1/2" and r["speaker_accuracy"] == 0.5
+
+
+def test_low_confidence_segment_gets_its_own_turn():
+    from minutesman.render import turns
+
+    segs = [Segment("a", 0, 0, 3, "B", "x", speaker="S2", confidence=0.8, text="nahi abhi pending hai"),
+            Segment("b", 0, 3.5, 6, "B", "y", speaker="S2", confidence=0.5, text="aur client demo"),
+            Segment("c", 0, 6.5, 8, "B", "z", speaker="S2", confidence=0.55, text="right?")]
+    t = turns(segs)
+    assert [x["text"] for x in t] == ["nahi abhi pending hai", "aur client demo right?"]
+    assert t[1]["confidence"] < 0.6
