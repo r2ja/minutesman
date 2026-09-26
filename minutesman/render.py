@@ -1,5 +1,4 @@
-"""Writes transcript.md (readable), transcript.json (everything), transcript.srt,
-transcript.txt (plain) into the output folder."""
+# Writes transcript.md, .txt, .srt and .json
 from __future__ import annotations
 
 import json
@@ -9,6 +8,7 @@ from pathlib import Path
 from .models import Segment, Speaker
 
 LOW_CONFIDENCE = 0.6
+GAP_NOTE_SECONDS = 30
 
 
 def ts(seconds: float, srt: bool = False) -> str:
@@ -19,20 +19,20 @@ def ts(seconds: float, srt: bool = False) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}" if srt else f"{h:02d}:{m:02d}:{s:02d}"
 
 
+# Merge same-speaker segments into turns; doubtful segments stay separate so the warning shows
 def turns(segments: list[Segment], max_gap: float = 2.0) -> list[dict]:
-    """Merge consecutive segments by the same speaker into readable turns. A doubtful
-    segment never merges with a confident one, so its ⚠ isn't averaged away."""
     out: list[dict] = []
     prev_low = False
     for s in segments:
         last = out[-1] if out else None
         low = s.confidence < LOW_CONFIDENCE
-        if last and last["speaker"] == s.speaker and s.start - last["end"] <= max_gap and low == prev_low:
+        if (last and last["speaker"] == s.speaker and last["meeting"] == s.meeting
+                and s.start - last["end"] <= max_gap and low == prev_low):
             last["end"] = s.end
             last["texts"].append(s.text)
             last["confs"].append((s.confidence, s.duration))
         else:
-            out.append({"speaker": s.speaker, "start": s.start, "end": s.end,
+            out.append({"speaker": s.speaker, "meeting": s.meeting, "start": s.start, "end": s.end,
                         "texts": [s.text], "confs": [(s.confidence, s.duration)]})
         prev_low = low
     for t in out:
@@ -48,7 +48,7 @@ def write_all(out_dir: Path, segments: list[Segment], speakers: list[Speaker], m
     label = {sp.id: sp.label for sp in speakers}
     tt = turns(segments)
 
-    # Markdown -----------------------------------------------------------------------
+    # Markdown
     md = [f"# Transcript: {Path(meta['source']).name}", "",
           f"Duration {ts(meta['duration_seconds'])} · {len(speakers)} speakers · "
           f"est. API cost ${meta['cost']['usd']:.2f}", "", "## Speakers", "",
@@ -60,28 +60,47 @@ def write_all(out_dir: Path, segments: list[Segment], speakers: list[Speaker], m
         elif sp.name_guess:
             ev = f"{sp.name_confidence:.2f}: {ev}"
         md.append(f"| **{sp.label}** | {sp.id} | {ts(sp.talk_seconds)} | {ev or '-'} |")
+    meetings = meta.get("meetings") or []
+    if len(meetings) > 1:
+        md += ["", "## Meetings", "", "| # | Time | Topic | Participants |", "|---|---|---|---|"]
+        for m in meetings:
+            who = ", ".join(label.get(p, p) for p in m["participants"])
+            md.append(f"| {m['index'] + 1} | {ts(m['start'])}–{ts(m['end'])} | {m['title']} | {who} |")
     md += ["", "Speaker confidence in brackets; ⚠ marks turns below "
-           f"{LOW_CONFIDENCE:.0%}.", "", "## Transcript", ""]
+           f"{LOW_CONFIDENCE:.0%}.", ""]
+    if len(meetings) <= 1:
+        md += ["## Transcript", ""]
+    current, prev_end = None, None
     for t in tt:
+        if len(meetings) > 1 and t["meeting"] != current:
+            current = t["meeting"]
+            if current >= 0:
+                m = meetings[current]
+                md += [f"## Meeting {current + 1}: {m['title']} ({ts(m['start'])}–{ts(m['end'])})", ""]
+            else:
+                md += ["## Between meetings", ""]
+        if prev_end is not None and t["start"] - prev_end >= GAP_NOTE_SECONDS:
+            md += [f"*… {(t['start'] - prev_end) / 60:.1f} min without speech …*", ""]
+        prev_end = t["end"]
         flag = " ⚠" if t["confidence"] < LOW_CONFIDENCE else ""
         md.append(f"**[{ts(t['start'])}] {label.get(t['speaker'], t['speaker'])}** "
                   f"({t['confidence']:.2f}){flag}: {t['text']}")
         md.append("")
     (out_dir / "transcript.md").write_text("\n".join(md), encoding="utf-8")
 
-    # Plain text -----------------------------------------------------------------------
+    # Plain text
     (out_dir / "transcript.txt").write_text(
         "\n".join(f"[{ts(t['start'])}] {label.get(t['speaker'], t['speaker'])} ({t['confidence']:.2f}): "
                   f"{t['text']}" for t in tt) + "\n", encoding="utf-8")
 
-    # SRT ------------------------------------------------------------------------------
+    # SRT
     srt = []
     for i, t in enumerate(tt, 1):
         srt += [str(i), f"{ts(t['start'], True)} --> {ts(t['end'], True)}",
                 f"{label.get(t['speaker'], t['speaker'])}: {t['text']}", ""]
     (out_dir / "transcript.srt").write_text("\n".join(srt), encoding="utf-8")
 
-    # JSON -----------------------------------------------------------------------------
+    # JSON
     data = {
         "meta": meta,
         "speakers": [asdict(sp) for sp in speakers],

@@ -38,9 +38,9 @@ def test_preprocess_roundtrip(tmp_path, enhance):
     assert audio.load_pcm(out).size > 0
 
 
+# A far talker at about -46 dBFS must come out usable
 @pytest.mark.parametrize("enhance", ["light", "strong"])
 def test_enhance_lifts_quiet_speech(tmp_path, enhance):
-    """A far-away talker at about -46 dBFS must come out at a usable level."""
     pcm, _ = synth([("ali", 4.0), ("sara", 4.0)], level=0.01, gap=1.5)
     t = np.arange(len(pcm)) / audio.SAMPLE_RATE
     pcm = pcm * (0.55 + 0.45 * np.sin(2 * np.pi * 4 * t)).astype(np.float32)  # syllable rhythm

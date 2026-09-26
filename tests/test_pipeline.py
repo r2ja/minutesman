@@ -124,8 +124,8 @@ def test_voiceprint_refine_merges_split_speaker():
     assert 0.5 <= segs[1].acoustic_confidence <= 0.6  # a lone segment is never certain
 
 
+# Two people in one far room got one label; voiceprints split them
 def test_voiceprint_moves_segment_the_diarizer_misattributed():
-    """Two people in the same far-away room got one label; the voice says otherwise."""
     import numpy as np
 
     class PitchEmbedder:
@@ -179,3 +179,81 @@ def test_low_confidence_segment_gets_its_own_turn():
     t = turns(segs)
     assert [x["text"] for x in t] == ["nahi abhi pending hai", "aur client demo right?"]
     assert t[1]["confidence"] < 0.6
+
+
+def test_split_meetings_cleans_llm_ranges():
+    from minutesman import llm
+
+    segs = [Segment(f"s{i}", 0, i * 10, i * 10 + 5, "A", "x", speaker="S1" if i < 4 else "S2")
+            for i in range(8)]
+    proposed = [llm.Meeting(first_line=4, last_line=9, title="Hiring", boundary_evidence=""),
+                llm.Meeting(first_line=0, last_line=4, title="Budget", boundary_evidence="")]  # overlaps
+    meetings, index_of = pipeline.split_meetings(segs, proposed)
+    assert [m["title"] for m in meetings] == ["Budget", "Hiring"] and index_of[0] == 1
+    assert [s.meeting for s in segs] == [0, 0, 0, 0, 0, 1, 1, 1]
+    assert meetings[1]["participants"] == ["S2"] and meetings[1]["end"] == 75
+
+
+def test_split_meetings_leaves_hallway_outside():
+    from minutesman import llm
+
+    segs = [Segment(f"s{i}", 0, i * 10, i * 10 + 5, "A", "x", speaker="S1") for i in range(6)]
+    proposed = [llm.Meeting(first_line=0, last_line=1, title="A", boundary_evidence=""),
+                llm.Meeting(first_line=4, last_line=5, title="B", boundary_evidence="")]
+    pipeline.split_meetings(segs, proposed)
+    assert [s.meeting for s in segs] == [0, 0, -1, -1, 1, 1]
+
+
+# The fake analyst starts a new meeting at a 'salam' line
+def test_two_meetings_end_to_end(tmp_path):
+    turns = [("ali", 5), ("sara", 5), ("ali", 4), ("bilal", 5), ("ayesha", 5), ("ali", 5), ("ayesha", 4)]
+    pcm, _ = synth(turns)
+    src = write_wav(tmp_path / "two.wav", pcm)
+
+    class Salam(FakeClient):
+        def __init__(self):
+            super().__init__()
+            orig = self.audio.transcriptions.create
+
+            def create(*a, **kw):
+                r = orig(*a, **kw)
+                for s in getattr(r, "segments", []):
+                    if s.text.startswith("ayesha") and s.start < 30:
+                        s.text = "ayesha salam everyone"
+                return r
+            self.audio.transcriptions.create = create
+
+    out = pipeline.run(src, tmp_path / "out", cfg().update(chunk_seconds=600), client=Salam())
+    data = load(out)
+    assert len(data["meta"]["meetings"]) == 2
+    md = (out / "transcript.md").read_text(encoding="utf-8")
+    assert "## Meetings" in md and "## Meeting 2: M1" in md
+
+
+def test_same_id_named_differently_in_two_meetings_is_split():
+    from minutesman import llm
+
+    reg = SpeakerRegistry()
+    sp = reg._new().speaker
+    segs = [Segment("a", 0, 0, 10, "B", "x", speaker=sp.id, meeting=0),
+            Segment("b", 0, 60, 64, "B", "y", speaker=sp.id, meeting=1)]
+    entries = [llm.SpeakerName(speaker=sp.id, meeting=0, name="Sara", confidence=0.9, evidence=""),
+               llm.SpeakerName(speaker=sp.id, meeting=1, name="Ayesha", confidence=0.85, evidence="")]
+    speakers = [sp]
+    best = pipeline.resolve_names(segs, speakers, entries, {0: 0, 1: 1, -1: -1}, reg, 0.75)
+    assert segs[0].speaker == sp.id and segs[1].speaker != sp.id
+    assert best[sp.id].name == "Sara" and best[segs[1].speaker].name == "Ayesha"
+    assert len(speakers) == 2
+
+
+def test_weak_second_name_does_not_split():
+    from minutesman import llm
+
+    reg = SpeakerRegistry()
+    sp = reg._new().speaker
+    segs = [Segment("a", 0, 0, 10, "B", "x", speaker=sp.id, meeting=0),
+            Segment("b", 0, 60, 64, "B", "y", speaker=sp.id, meeting=1)]
+    entries = [llm.SpeakerName(speaker=sp.id, meeting=0, name="Sara", confidence=0.9, evidence=""),
+               llm.SpeakerName(speaker=sp.id, meeting=1, name="Ayesha", confidence=0.4, evidence="")]
+    best = pipeline.resolve_names(segs, [sp], entries, {0: 0, 1: 1, -1: -1}, reg, 0.75)
+    assert segs[1].speaker == sp.id and best[sp.id].name == "Sara"

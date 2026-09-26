@@ -1,12 +1,4 @@
-"""The two speech-to-text passes.
-
-Pass A (`diarize_chunk`): gpt-4o-transcribe-diarize on ~10 min chunks. Gives who
-spoke when, plus a first text hypothesis.
-
-Pass B (`transcribe_window`): gpt-transcribe on ~90 s windows cut on pass-A turn
-boundaries. It is the stronger text model (code-switching, language hints,
-keywords) but returns no timestamps, so short windows keep it aligned with pass A.
-"""
+# Speech-to-text passes: A = diarize (who/when), B = gpt-transcribe on short windows (best text)
 from __future__ import annotations
 
 import io
@@ -27,8 +19,8 @@ def _field(obj, name, default=None):
     return getattr(obj, name, default)
 
 
+# gpt-transcribe rejects '<', '>' and line breaks in prompt/keywords
 def _prompt_safe(text: str, limit: int = 900) -> str:
-    """gpt-transcribe rejects '<', '>' and line breaks in prompt/keywords."""
     text = re.sub(r"[<>\r\n]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()[-limit:]
 
@@ -79,8 +71,7 @@ def transcribe_window(client: OpenAI, cfg: Settings, mp3: bytes, window: Window,
             prompt=prompt, response_format="json", **extra,
         )
     except (BadRequestError, NotFoundError) as exc:
-        # Older accounts or regions may lack gpt-transcribe; its successor-era params
-        # (languages/keywords) are also unknown to older models.
+        # Fallback for accounts without gpt-transcribe (older models don't take languages/keywords)
         log.warning("%s failed (%s); falling back to %s", model, exc, cfg.fallback_transcribe_model)
         resp = client.audio.transcriptions.create(
             model=cfg.fallback_transcribe_model,
@@ -92,9 +83,8 @@ def transcribe_window(client: OpenAI, cfg: Settings, mp3: bytes, window: Window,
     return window
 
 
+# Group segments into ~target-second windows, cutting only between segments
 def plan_windows(segs: list[Segment], chunk_index: int, target: float, first_id: int) -> list[Window]:
-    """Group consecutive segments into windows of about `target` seconds, cutting only
-    between segments so each window's text maps cleanly to its segments."""
     windows: list[Window] = []
     cur: list[Segment] = []
     for s in segs:

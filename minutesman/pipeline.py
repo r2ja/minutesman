@@ -1,9 +1,4 @@
-"""End-to-end run: audio -> enhanced chunks -> pass A (diarize) -> speaker linking ->
-voiceprints (optional) -> pass B (windows) -> LLM fusion -> speaker naming -> outputs.
-
-Every API result is cached under <out>/work/, so rerunning after a crash or tweaking
-later stages never pays for finished transcription again (use --fresh to redo all).
-"""
+# Pipeline: enhance, diarize, link speakers, voiceprints, transcribe, fuse, analyze, write (API results cached)
 from __future__ import annotations
 
 import json
@@ -49,7 +44,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         shutil.rmtree(work)
     cache = _Cache(work / "cache")
 
-    # 1. Audio ------------------------------------------------------------------------
+    # 1. Audio
     enhanced_path = work / f"enhanced_{cfg.enhance}.wav"
     if not enhanced_path.exists():
         log.info("Preprocessing audio (enhance=%s)", cfg.enhance)
@@ -60,14 +55,14 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     chunks = audio.plan_chunks(total, cfg.chunk_seconds, cfg.overlap_seconds)
     log.info("Audio: %.1f min, %d chunk(s)", total / 60, len(chunks))
 
-    # 2. Voice samples ----------------------------------------------------------------
+    # 2. Voice samples
     registry = SpeakerRegistry(max_known=cfg.max_known_speakers)
     enrolled_pcm = {}
     for name, path in (voices or {}).items():
         sample = audio.load_pcm(audio.preprocess(path, work / "voices" / f"{name}.wav", cfg.enhance))
         enrolled_pcm[registry.enroll(name, sample)] = sample
 
-    # 3. Pass A, sequential: each chunk is told about the speakers found so far --------
+    # 3. Pass A, sequential: each chunk is told about the speakers found so far
     per_chunk: list[list[Segment]] = []
     minutes_a = 0.0
     for ch in chunks:
@@ -96,7 +91,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         s.level_dbfs = round(audio.level_dbfs(audio.slice_pcm(raw_pcm, s.start, s.end)), 1)
     del raw_pcm  # ~300 MB for 80 minutes; not needed any more
 
-    # 4. Voiceprints --------------------------------------------------------------------
+    # 4. Voiceprints
     if cfg.voiceprints and voiceprint.available():
         log.info("Voiceprints: embedding %d segments locally", len(segments))
         emb = voiceprint.Embedder(work / "models")
@@ -105,15 +100,15 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     elif cfg.voiceprints:
         log.info("Voiceprints skipped (install with: pip install -e \".[voiceprint]\")")
 
-    # 5. Pass B on short windows, in parallel --------------------------------------------
+    # 5. Pass B on short windows, in parallel
     windows: list[Window] = []
     for ch in chunks:
         windows += asr.plan_windows([s for s in segments if s.chunk == ch.index], ch.index,
                                     cfg.window_seconds, len(windows))
     prev_text = {w.id: " ".join(s.text_a for s in segments if s.window == w.id - 1)[-300:] for w in windows}
 
+    # Returns billed minutes, 0 when cached
     def pass_b(w: Window) -> float:
-        """Returns the billed minutes (0 when served from cache)."""
         cached = cache.get(f"passB_{w.id:04d}")
         if cached and cached["start"] == w.start and cached["end"] == w.end:
             w.text_b, w.languages = cached["text_b"], cached["languages"]
@@ -127,7 +122,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     with ThreadPoolExecutor(cfg.concurrency) as pool:
         minutes_b = sum(pool.map(pass_b, windows))
 
-    # 6. LLM fusion per chunk, in parallel ------------------------------------------------
+    # 6. LLM fusion per chunk, in parallel
     usage = llm.Usage()
 
     def fuse(ch) -> None:
@@ -166,7 +161,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         list(pool.map(fuse, chunks))
     segments = [s for s in segments if s.text]
 
-    # 7. Confidence, names, labels --------------------------------------------------------
+    # 7. Confidence, names, labels
     for s in segments:
         s.confidence = combine_confidence(s)
     active = {s.speaker for s in segments}
@@ -174,15 +169,22 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     for sp in speakers:
         sp.talk_seconds = round(sum(s.duration for s in segments if s.speaker == sp.id), 1)
 
-    cached = cache.get("names")
-    if cached and set(cached) == active:
-        names = {k: llm.SpeakerName(**v) for k, v in cached.items()}
-    else:
-        names = llm.name_speakers(client, cfg, segments, speakers, usage)
-        cache.put("names", {k: v.model_dump() for k, v in names.items() if k in active})
-    assign_labels(speakers, names, segments, cfg.name_threshold)
+    fingerprint = [[s.id, s.speaker, s.text] for s in segments]
+    cached = cache.get("analysis")
+    analysis = None
+    if cached and cached["segments"] == fingerprint:
+        try:
+            analysis = llm.Analysis(**cached["analysis"])
+        except ValueError:
+            log.info("Cached analysis is from an older version; redoing it")
+    if analysis is None:
+        analysis = llm.analyze(client, cfg, segments, speakers, usage)
+        cache.put("analysis", {"segments": fingerprint, "analysis": analysis.model_dump()})
+    meetings, index_of = split_meetings(segments, analysis.meetings)
+    best = resolve_names(segments, speakers, analysis.speakers, index_of, registry, cfg.name_threshold)
+    assign_labels(speakers, best, segments, cfg.name_threshold)
 
-    # 8. Outputs ------------------------------------------------------------------------
+    # 8. Outputs
     cost = {
         "pass_a_minutes": round(minutes_a, 2),
         "pass_b_minutes": round(minutes_b, 2),
@@ -195,7 +197,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     cost["note"] = "Counts only API calls made in this run; stages served from cache cost nothing."
     meta = {
         "source": str(src), "duration_seconds": round(total, 1), "settings": asdict(cfg),
-        "voiceprints": cfg.voiceprints and voiceprint.available(), "cost": cost,
+        "voiceprints": cfg.voiceprints and voiceprint.available(), "cost": cost, "meetings": meetings,
         "elapsed_seconds": round(time.time() - t0, 1),
     }
     render.write_all(out_dir, segments, speakers, meta)
@@ -208,13 +210,8 @@ def llm_cost(model: str, inp: int, cached: int, out: int) -> float:
     return ((inp - cached) * p_in + cached * p_cached + out * p_out) / 1e6
 
 
+# Blend voiceprint 0.5, linking 0.3, LLM 0.2 (over sources present), then discount short or quiet segments
 def combine_confidence(s: Segment) -> float:
-    """Blend of whatever evidence exists; each source is already in [0, 1].
-
-    acoustic (voiceprint) 0.5, chunk linking 0.3, LLM conversation check 0.2 —
-    renormalised over the sources present — then discounted for very short or very
-    quiet segments, where every signal is less reliable.
-    """
     parts = [(s.link_confidence, 0.3)]
     if s.acoustic_confidence is not None:
         parts.append((s.acoustic_confidence, 0.5))
@@ -228,9 +225,77 @@ def combine_confidence(s: Segment) -> float:
     return round(max(0.0, min(1.0, c)), 3)
 
 
+# Clean the LLM's line ranges into non-overlapping meetings; lines outside any stay -1
+def split_meetings(segments: list[Segment], proposed) -> list[dict]:
+    n = len(segments)
+    spans = sorted((max(0, m.first_line), min(n - 1, m.last_line), i, m) for i, m in enumerate(proposed)
+                   if m.first_line <= m.last_line and m.first_line < n)
+    kept, last_end = [], -1
+    for a, b, i, m in spans:
+        a = max(a, last_end + 1)
+        if a <= b:
+            kept.append((a, b, i, m))
+            last_end = b
+    if not kept and n:
+        kept = [(0, n - 1, -2, None)]
+    meetings, index_of = [], {-1: -1}
+    for k, (a, b, i, m) in enumerate(kept):
+        index_of[i] = k
+        for s in segments[a:b + 1]:
+            s.meeting = k
+        members = segments[a:b + 1]
+        talk: dict[str, float] = {}
+        for s in members:
+            talk[s.speaker] = talk.get(s.speaker, 0.0) + s.duration
+        meetings.append({
+            "index": k, "title": m.title if m else "Meeting",
+            "start": members[0].start, "end": members[-1].end,
+            "participants": sorted(talk, key=talk.get, reverse=True),
+            "boundary_evidence": m.boundary_evidence if m else "",
+        })
+    return meetings, index_of
+
+
+# Split an id that is confidently a different named person in different meetings; return best name per id
+def resolve_names(segments, speakers, entries, index_of: dict, registry, threshold: float) -> dict:
+    by_id: dict[str, list] = {}
+    for e in entries:
+        by_id.setdefault(e.speaker, []).append((index_of.get(e.meeting, -1), e))
+    for sp in list(speakers):
+        confident: dict[str, list] = {}
+        for m, e in by_id.get(sp.id, []):
+            if e.name and e.confidence >= threshold and m >= 0:
+                confident.setdefault(e.name.strip().lower(), []).append((m, e))
+        if sp.enrolled or len(confident) < 2:
+            continue
+        talk = {k: sum(s.duration for s in segments if s.speaker == sp.id and s.meeting in {m for m, _ in v})
+                for k, v in confident.items()}
+        keep = max(talk, key=talk.get)
+        for name, hits in confident.items():
+            if name == keep:
+                continue
+            new = registry._new().speaker
+            moved_meetings = {m for m, _ in hits}
+            for s in segments:
+                if s.speaker == sp.id and s.meeting in moved_meetings:
+                    s.speaker = new.id
+                    s.notes = (s.notes + f" split from {sp.id}: named differently in this meeting;").strip()
+            new.talk_seconds = round(sum(s.duration for s in segments if s.speaker == new.id), 1)
+            sp.talk_seconds = round(sp.talk_seconds - new.talk_seconds, 1)
+            speakers.append(new)
+            by_id[new.id] = [(m, e) for m, e in hits]
+            by_id[sp.id] = [(m, e) for m, e in by_id[sp.id] if m not in moved_meetings]
+            log.info("Names: %s is two people across meetings; split %s into %s", sp.id, hits[0][1].name, new.id)
+    best = {}
+    for sid, hits in by_id.items():
+        named = [e for _, e in hits if e.name]
+        if named:
+            best[sid] = max(named, key=lambda e: e.confidence)
+    return best
+
+
+# Real names only above threshold and never twice; everyone else is Guest N by first appearance
 def assign_labels(speakers, names: dict, segments: list[Segment], threshold: float) -> None:
-    """Real names only above `threshold`, no duplicates; everyone else is Guest N in
-    order of first appearance."""
     for sp in speakers:
         n = names.get(sp.id)
         if not sp.enrolled and n is not None:

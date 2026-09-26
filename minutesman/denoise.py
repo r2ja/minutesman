@@ -1,14 +1,4 @@
-"""Neural noise suppression, fetched on first use into a per-user cache.
-
-- RNNoise (via ffmpeg's built-in `arnndn`): small, fast, real-time. Model:
-  "somnolent-hogwash" from github.com/GregorR/rnnoise-models, trained for
-  speech in recording noise (the README says the models are not subject to copyright).
-- DeepFilterNet 3 (standalone `deep-filter` binary, MIT/Apache-2.0): the strongest
-  open-source suppressor, comparable to Krisp. ~0.3x real time on a laptop CPU.
-
-Krisp itself was considered: its SDK is enterprise-licensed and sold through sales, so
-it's not an option for a personal setup.
-"""
+# Neural denoisers (RNNoise, DeepFilterNet) downloaded on first use; Krisp is enterprise-only
 from __future__ import annotations
 
 import os
@@ -67,8 +57,8 @@ def deepfilter_exe() -> Path:
     return exe
 
 
+# Run DeepFilterNet on a 48 kHz mono WAV with delay compensation
 def deepfilter(src_48k: Path, dst: Path) -> Path:
-    """Run DeepFilterNet on a 48 kHz mono WAV (with delay compensation, so timestamps hold)."""
     with tempfile.TemporaryDirectory() as tmp:
         proc = subprocess.run(
             [str(deepfilter_exe()), "-D", "-a", str(DF_ATTENUATION_DB), "-o", tmp, str(src_48k)],

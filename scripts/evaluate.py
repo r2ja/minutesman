@@ -1,15 +1,4 @@
-"""Score a minutesman run against a ground-truth file from make_test_audio.py.
-
-    python scripts/evaluate.py output/synth/transcript.json samples/synthetic_meeting.truth.json
-
-Speaker accuracy: share of reference speech time whose output speaker maps to the right
-person. Each output speaker is mapped to the true person it overlaps most, so the score
-reflects diarization, not naming. Several output ids can map to one person; each extra
-id is reported as a split.
-Text: character error rate (CER) of the whole transcript against the Roman Urdu
-reference, after lowercasing and stripping punctuation. CER is used instead of WER
-because Roman Urdu spelling varies ("hai"/"hay", "nahi"/"nahin").
-"""
+# Score a run against make_test_audio.py truth: speaker accuracy, meetings and text CER
 from __future__ import annotations
 
 import json
@@ -64,7 +53,27 @@ def evaluate(run: dict, truth: list[dict]) -> dict:
         by_cond[cond].append(want == got)
     hyp = " ".join(s["text"] for s in segs)
     ref = " ".join(t["reference"] for t in truth)
+    meetings = {}
+    if "meeting" in truth[0]:
+        # Each true turn gets the meeting of the output segments overlapping it most
+        got_m = []
+        for t in truth:
+            votes: dict[int, float] = defaultdict(float)
+            for s in segs:
+                ov = min(s["end"], t["end"]) - max(s["start"], t["start"])
+                if ov > 0:
+                    votes[s.get("meeting", -1)] += ov
+            got_m.append(max(votes, key=votes.get) if votes else -1)
+        pairs = defaultdict(lambda: defaultdict(int))
+        for t, g in zip(truth, got_m):
+            pairs[g][t["meeting"]] += 1
+        m_map = {g: max(v, key=v.get) for g, v in pairs.items()}
+        right = sum(m_map[g] == t["meeting"] for t, g in zip(truth, got_m))
+        meetings = {"meetings_found": len(run["meta"].get("meetings", [])),
+                    "meetings_true": len({t["meeting"] for t in truth if t["meeting"] >= 0}),
+                    "turns_in_right_meeting": f"{right}/{len(truth)}"}
     return {
+        **meetings,
         "speaker_accuracy": round(correct / total, 3),
         "turns_correct": f"{sum(w == g for _, w, g in per_turn)}/{len(per_turn)}",
         "turns_correct_by_condition": {c: f"{sum(v)}/{len(v)}" for c, v in by_cond.items()},

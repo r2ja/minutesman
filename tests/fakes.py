@@ -1,9 +1,4 @@
-"""Offline stand-ins for the OpenAI client.
-
-Synthetic "speech" is a tone per speaker. The fake diarizer finds tone bursts and names
-them by pitch, so it behaves like the real API: letters for unknown voices, our ids for
-voices matching a known-speaker reference clip.
-"""
+# Offline OpenAI stand-in: synthetic speakers are tones, recognised by pitch
 from __future__ import annotations
 
 import base64
@@ -18,8 +13,8 @@ SR = audio.SAMPLE_RATE
 FREQS = {"ali": 220.0, "sara": 390.0, "bilal": 560.0, "ayesha": 760.0}
 
 
+# Tone 'speech' for (speaker, seconds) turns; returns pcm and truth
 def synth(turns: list[tuple[str, float]], gap: float = 0.6, level: float = 0.3) -> tuple[np.ndarray, list]:
-    """turns: (speaker, seconds). Returns pcm and ground truth [(speaker, start, end)]."""
     pcm, truth, t = [], [], 0.0
     for spk, dur in turns:
         n = int(dur * SR)
@@ -98,20 +93,26 @@ class FakeResponses:
                                      suggested_speaker=None, note="")
                     for w in data["windows"] for s in w["pass_a_segments"]]
             return SimpleNamespace(output_parsed=llm.FusedChunk(segments=segs), usage=usage)
-        # Naming: name whoever talks as "ali" confidently, "sara" weakly.
+        # Names "ali" confidently and "sara" weakly; a "salam" line starts a new meeting
         ids = user.split("Speaker ids: ")[1].split("\n")[0].split(", ")
-        lines = user.split("Transcript:\n")[1].splitlines()
-        first = {}
-        for line in lines:
-            sid, text = line.split("] ", 1)[1].split(": ", 1)
+        lines = [ln for ln in user.split("Transcript:\n")[1].splitlines() if ln.startswith("L")]
+        first, starts = {}, [0]
+        for ln in lines:
+            num = int(ln.split(" ", 1)[0][1:])
+            sid, text = ln.split("] ", 1)[1].split(": ", 1)
             first.setdefault(sid, text.split()[0])
+            if "salam" in text and num > 0:
+                starts.append(num)
         out = []
         for sid in ids:
             who = first.get(sid)
             conf = {"ali": 0.9, "sara": 0.5}.get(who, 0.1)
-            out.append(llm.SpeakerName(speaker=sid, name=who.title() if conf > 0.3 else None,
+            out.append(llm.SpeakerName(speaker=sid, meeting=0, name=who.title() if conf > 0.3 else None,
                                        confidence=conf, evidence="test"))
-        return SimpleNamespace(output_parsed=llm.SpeakerNames(speakers=out), usage=usage)
+        ends = [s - 1 for s in starts[1:]] + [len(lines) - 1]
+        meetings = [llm.Meeting(first_line=a, last_line=b, title=f"M{k}", boundary_evidence="test")
+                    for k, (a, b) in enumerate(zip(starts, ends))]
+        return SimpleNamespace(output_parsed=llm.Analysis(speakers=out, meetings=meetings), usage=usage)
 
 
 class FakeClient:

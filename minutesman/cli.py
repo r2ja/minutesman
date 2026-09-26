@@ -1,9 +1,10 @@
-"""Command line entry point: `minutesman run`, `minutesman estimate`, `minutesman check`."""
+# Command line: run, estimate, check, shrink
 from __future__ import annotations
 
 import argparse
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -29,17 +30,15 @@ def _voices(items: list[str]) -> dict[str, Path]:
     return out
 
 
-# LLM tokens per minute of audio, measured on the synthetic meeting with gpt-6-sol at medium
-# effort (fusion + naming). That audio is wall-to-wall speech, so real meetings with pauses
-# usually come in lower.
+# LLM tokens per audio minute, measured with gpt-6-sol at medium effort (non-stop speech, so an upper bound)
 TOKENS_IN_PER_MIN = 1600
 TOKENS_OUT_PER_MIN = 1150  # includes reasoning tokens
 TOKENS_IN_PER_CHUNK = 1000  # system prompt + context, once per chunk
 EFFORT_OUTPUT_FACTOR = {"none": 0.6, "low": 0.75, "medium": 1.0, "high": 1.6, "xhigh": 2.4}
 
 
+# Projected cost from the measured token rates above
 def estimate(minutes: float, cfg: Settings) -> dict:
-    """Projected cost, calibrated on real runs (see the constants above)."""
     a = minutes * (1 + cfg.overlap_seconds / cfg.chunk_seconds) * TRANSCRIBE_PRICE_PER_MIN[cfg.diarize_model]
     b = minutes * 1.01 * TRANSCRIBE_PRICE_PER_MIN.get(cfg.transcribe_model, 0.006)
     chunks = max(1, round(minutes / (cfg.chunk_seconds / 60)))
@@ -54,13 +53,13 @@ def estimate(minutes: float, cfg: Settings) -> dict:
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
     cfg = Settings()
-    ap = argparse.ArgumentParser(prog="minutesman", description=__doc__)
+    ap = argparse.ArgumentParser(prog="minutesman", description="Diarized Urdu/English meeting transcripts in Roman Urdu")
     ap.add_argument("--version", action="version", version=__version__)
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="transcribe + diarize a recording")
-    r.add_argument("audio", type=Path)
+    r.add_argument("audio", help="audio/video file, or a share link (Google Drive, Dropbox, direct URL)")
     r.add_argument("-o", "--out", type=Path, help="output folder (default: output/<file name>)")
     r.add_argument("--voice", action="append", metavar="NAME=FILE",
                    help="voice sample of a known participant (5-10 s of them alone); repeatable")
@@ -81,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("check", help="verify ffmpeg, API key, model access, voiceprint extra")
 
+    sh = sub.add_parser("shrink", help="make a small speech-quality copy (Opus) for uploading")
+    sh.add_argument("audio", type=Path)
+    sh.add_argument("-o", "--out", type=Path, help="default: <name>.small.ogg next to the input")
+    sh.add_argument("--bitrate", default="32k")
+
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
@@ -100,6 +104,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "check":
         return check(cfg)
 
+    if args.cmd == "shrink":
+        dst = args.out or args.audio.with_suffix(".small.ogg")
+        audio.shrink(args.audio, dst, args.bitrate)
+        mb = lambda p: p.stat().st_size / 1e6  # noqa: E731
+        print(f"{args.audio} ({mb(args.audio):.1f} MB) -> {dst} ({mb(dst):.1f} MB), "
+              f"{audio.duration(dst) / 60:.1f} min")
+        return 0
+
+    if re.match(r"https?://", args.audio):
+        from .fetch import download
+
+        args.audio = download(args.audio, Path("downloads"))
+    args.audio = Path(args.audio)
     if not args.audio.exists():
         raise SystemExit(f"No such file: {args.audio}")
     cfg.update(

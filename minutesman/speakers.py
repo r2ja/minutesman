@@ -1,15 +1,4 @@
-"""Keeps speaker identities consistent across chunks.
-
-The diarizer labels speakers per request (A, B, C...), so an 80-minute file split
-into ten-minute chunks needs its labels stitched together. Three signals are used,
-strongest first:
-
-1. Known-speaker references: short clips of speakers already seen are sent with each
-   new chunk (API limit: 4), and the diarizer answers with our global ids directly.
-2. Overlap voting: consecutive chunks share `overlap_seconds` of audio; a new label
-   that talks over the same seconds as a known speaker in the previous chunk is them.
-3. Voiceprints (optional, local): see voiceprint.py; refines links after the fact.
-"""
+# Keeps speaker ids consistent across chunks: known-speaker references, then overlap voting
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -35,7 +24,6 @@ class SpeakerRegistry:
     max_known: int = 4
     entries: dict[str, _Entry] = field(default_factory=dict)
 
-    # -- registration -----------------------------------------------------------------
     def _new(self, name: str | None = None, clip: np.ndarray | None = None) -> _Entry:
         sid = f"S{len(self.entries) + 1}"
         spk = Speaker(id=sid)
@@ -46,26 +34,24 @@ class SpeakerRegistry:
         self.entries[sid] = e
         return e
 
+    # Register a user voice sample (first 10 s)
     def enroll(self, name: str, pcm: np.ndarray) -> str:
-        """Register a user-supplied voice sample (only the first 10 s are sent)."""
         return self._new(name, pcm[: int(REF_MAX * SAMPLE_RATE)]).speaker.id
 
     @property
     def speakers(self) -> list[Speaker]:
         return [e.speaker for e in self.entries.values()]
 
-    # -- references for the next diarization request ---------------------------------
+    # Up to max_known reference clips: enrolled first, then recent, then talkative
     def known_references(self) -> tuple[list[str], list[str]]:
-        """Up to `max_known` (ids, data URLs), preferring enrolled, recent, talkative."""
         cands = [e for e in self.entries.values() if e.ref_clip is not None]
         cands.sort(key=lambda e: (e.speaker.enrolled, e.last_chunk, e.speaker.talk_seconds), reverse=True)
         chosen = cands[: self.max_known]
         return [e.speaker.id for e in chosen], [wav_data_url(e.ref_clip) for e in chosen]
 
-    # -- linking ----------------------------------------------------------------------
+    # Assign global ids to one chunk's segments in place
     def link_chunk(self, chunk_index: int, segs: list[Segment], prev: list[Segment],
                    referenced: list[str]) -> None:
-        """Assign global ids to `segs` (one chunk, un-trimmed) in place."""
         labels = sorted({s.local_speaker for s in segs})
         crowded = len(self.entries) > len(referenced)  # someone known wasn't referenced
         mapping: dict[str, tuple[str, float]] = {}
@@ -101,12 +87,8 @@ class SpeakerRegistry:
             return None
         return best, round(0.55 + 0.35 * share, 3)
 
-    # -- bookkeeping ------------------------------------------------------------------
+    # Update talk time and keep each speaker's best reference clip
     def absorb(self, segs: list[Segment], pcm: np.ndarray, pcm_offset: float = 0.0) -> None:
-        """Update talk time and keep the best reference clip per speaker.
-
-        `pcm` is the enhanced audio of the chunk; `pcm_offset` its absolute start time.
-        """
         for s in segs:
             e = self.entries[s.speaker]
             e.speaker.talk_seconds += s.duration

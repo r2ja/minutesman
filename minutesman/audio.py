@@ -1,5 +1,4 @@
-"""Audio I/O via a bundled ffmpeg binary (imageio-ffmpeg), so nothing needs to be
-installed system-wide on Windows, macOS or Linux."""
+# Audio I/O through the bundled ffmpeg binary, no system install needed
 from __future__ import annotations
 
 import base64
@@ -15,15 +14,7 @@ import numpy as np
 
 SAMPLE_RATE = 16000
 
-# Speech-focused cleanup for phone recordings moved between rooms. Order matters:
-# gain first, so far/quiet talkers are lifted before denoising. afftdn works against
-# an absolute noise floor, and speech sitting at -45 dBFS would be removed as "noise"
-# if it ran first. Denoising is kept mild: ASR models cope with noise much better
-# than with denoiser artifacts or near-silent speech.
-#   highpass/lowpass  - drop rumble and hiss outside the speech band
-#   dynaudnorm (1st)  - per-window gain, up to 30x, lifts quiet talkers without clipping loud ones
-#   afftdn            - spectral denoise with noise-floor tracking
-#   dynaudnorm (2nd)  - small final level trim
+# Cleanup chains: gain first (lifts far/quiet talkers), then mild denoise, else quiet speech is removed as noise
 ENHANCE_FILTERS = {
     "off": "anull",
     "light": (
@@ -63,8 +54,8 @@ def _run(args: list[str], input_bytes: bytes | None = None, cwd: Path | None = N
     return proc.stdout
 
 
+# Duration in seconds, read from ffmpeg's header output
 def duration(path: Path) -> float:
-    """Duration in seconds (decodes headers via ffmpeg; no ffprobe needed)."""
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-i", str(path)], capture_output=True, text=True, errors="replace"
     )
@@ -75,8 +66,8 @@ def duration(path: Path) -> float:
     return int(h) * 3600 + int(mnt) * 60 + float(s)
 
 
+# Decode to 16 kHz mono WAV with the chosen cleanup
 def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
-    """Decode anything ffmpeg understands to 16 kHz mono WAV, with optional cleanup."""
     if enhance not in ENHANCE_FILTERS:
         raise ValueError(f"enhance must be one of {sorted(ENHANCE_FILTERS)}")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -104,8 +95,15 @@ def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
     return dst
 
 
+# Small speech-quality Opus copy for uploading (80 min at 32 kbps is ~19 MB)
+def shrink(src: Path, dst: Path, bitrate: str = "32k") -> Path:
+    _run(["-y", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "libopus",
+          "-b:a", bitrate, "-application", "voip", str(dst)])
+    return dst
+
+
+# Whole file as float32 mono at 16 kHz
 def load_pcm(path: Path) -> np.ndarray:
-    """Whole file as float32 mono at 16 kHz."""
     raw = _run(["-i", str(path), "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"])
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -126,8 +124,8 @@ def pcm_to_wav_bytes(pcm: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
+# Upload format: 10 min at 64 kbps mono is ~4.8 MB, under the 25 MB cap
 def pcm_to_mp3_bytes(pcm: np.ndarray, bitrate: str = "64k") -> bytes:
-    """Compact upload format: 10 min of 64 kbps mono is ~4.8 MB, well under the 25 MB cap."""
     return _run(["-f", "wav", "-i", "-", "-c:a", "libmp3lame", "-b:a", bitrate, "-f", "mp3", "-"],
                 input_bytes=pcm_to_wav_bytes(pcm))
 
@@ -136,8 +134,8 @@ def wav_data_url(pcm: np.ndarray) -> str:
     return "data:audio/wav;base64," + base64.b64encode(pcm_to_wav_bytes(pcm)).decode()
 
 
+# RMS level of the louder half of 20 ms frames, in dBFS
 def level_dbfs(pcm: np.ndarray) -> float:
-    """RMS level of the active (non-silent) part of a clip, in dBFS."""
     if pcm.size == 0:
         return -120.0
     frame = SAMPLE_RATE // 50  # 20 ms
@@ -157,8 +155,7 @@ class Chunk:
     index: int
     start: float
     end: float
-    # Segments whose midpoint falls in [keep_start, keep_end) belong to this chunk;
-    # the rest of the overlap is only used to link speakers with the neighbour.
+    # A segment belongs to the chunk whose [keep_start, keep_end) holds its midpoint
     keep_start: float
     keep_end: float
 

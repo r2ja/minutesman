@@ -113,6 +113,24 @@ Takeaways, with the caveat that this is one short synthetic file:
   mostly get low confidence (0.56–0.66 overall, most below the ⚠ line) versus 0.85–0.90 for
   clean turns. **Voice samples (`--voice`) are the strongest fix** when you know who attended.
 
+### Two meetings in one recording
+
+`--scenario multi`: 2.2 min, budget meeting (Ahmed, Sara, Bilal) → 20 s hallway walk with a remark →
+35 s silence → hiring meeting (Ahmed, Ayesha, and Usman, who is new) in a worse room. Default settings:
+
+| | Result |
+|---|---|
+| Meetings found | 2 of 2, every turn in the right meeting, hallway remark placed between meetings |
+| Turns attributed correctly | 10/10 (speech time 0.80) |
+| Names | Sara, Bilal, Ayesha, Usman correct; Ahmed stays Guest 1 (never named right before he spoke) |
+| Text CER | 3.1% |
+| Cost | $0.054 |
+
+Before per-meeting naming, Sara (meeting 1, far) and Ayesha (meeting 2, quiet) shared one id: similar
+voices, and the diarizer gave both the same label. The analysis flagged it as "the names conflict".
+Names are now judged per meeting, and an id confidently named differently in two meetings is split.
+That fixed it. One leftover: a 1 s greeting became its own "Guest 2", flagged ⚠ at 0.49.
+
 ## 5. Cost for one 80-minute recording
 
 `minutesman estimate 80`. LLM token rates are calibrated on real runs; the 91 s test meeting

@@ -27,8 +27,8 @@ audio ─► ffmpeg enhance (gain first, mild denoise) ─► 10-min chunks, 30 
    ├─► speaker linking across chunks (references → overlap vote → voiceprints*)
    ├─► Pass B  gpt-transcribe on ~90 s windows  better code-switched text (ur+en hints)
    ├─► LLM fusion  gpt-6-sol  A+B → Roman Urdu/English, per-segment speaker sanity check
-   └─► LLM naming  explicit evidence only → name ≥ 0.75 else "Guest N"
-        → transcript.md / .txt / .srt / .json
+   └─► LLM analysis  meeting boundaries + names per meeting (≥ 0.75 else "Guest N")
+        → transcript.md / .txt / .srt / .json, split by meeting
 * optional local ECAPA speaker embeddings (free, CPU)
 ```
 
@@ -55,17 +55,47 @@ In a cloud container, set `OPENAI_API_KEY` as an environment secret instead of `
 ## Use
 
 ```bash
-minutesman estimate path/to/meeting.m4a          # cost before spending anything
-minutesman run path/to/meeting.m4a \
-    --context "Weekly product sync, office in Lahore" \
+minutesman estimate path/to/recording.m4a        # cost before spending anything
+minutesman run path/to/recording.m4a \
+    --context "Office day in Lahore, several meetings" \
     --keywords "Ahmed,Sara,Bilal,Ayesha,Jira,staging,Q3"
+```
+
+A file in your Downloads folder:
+
+```bash
+minutesman run "%USERPROFILE%\Downloads\recording.m4a"     # Windows (cmd)
+minutesman run "$HOME\Downloads\recording.m4a"             # Windows (PowerShell)
+minutesman run ~/Downloads/recording.m4a                   # macOS / Linux
+```
+
+Any size and format that ffmpeg reads works (m4a, mp3, wav, aac, ogg, even video). Chunks
+are re-encoded before upload, so a 120 MB file never hits the API's 25 MB limit.
+
+### One recording, several meetings
+
+The analysis step finds where each meeting starts and ends: greetings, closings, long silences,
+a change in who is present or in the topic. The transcript gets a **Meetings** table and one
+section per meeting. Walking and hallway talk go under **Between meetings**, and long silences
+are marked. Names are judged per meeting. If the diarizer gave two similar voices from
+different rooms the same id and the conversation names them differently (e.g. "Sara" in one
+room, "Ayesha" in the next), the id is split into two people.
+
+### Running in the cloud
+
+A recording is too big (and too private) for git. Make a small speech-quality copy, share it
+as "anyone with the link" on Google Drive or Dropbox, and pass the link:
+
+```bash
+minutesman shrink recording.m4a            # -> recording.small.ogg, ~19 MB for 80 min
+minutesman run "https://drive.google.com/file/d/<id>/view?usp=sharing"
 ```
 
 Output goes to `output/<file name>/`:
 
 | File | Contents |
 |---|---|
-| `transcript.md` | Speaker table (with name evidence) and the transcript with confidences; ⚠ on turns below 0.60 |
+| `transcript.md` | Speaker table (with name evidence), meetings table, and the transcript per meeting with confidences; ⚠ on turns below 0.60 |
 | `transcript.txt` | Same, plain text |
 | `transcript.srt` | Subtitles with speaker labels |
 | `transcript.json` | Everything: segments with both ASR hypotheses, all confidence components, notes, cost and token usage |
@@ -95,7 +125,8 @@ Output goes to `output/<file name>/`:
 
 ### Test audio
 
-`python scripts/make_test_audio.py` synthesizes a ~2-minute, 4-speaker Urdu/English meeting
+`python scripts/make_test_audio.py` synthesizes a ~1.5-minute, 4-speaker Urdu/English meeting
+(`--scenario multi`: two meetings, 5 people, a hallway walk and a long silence)
 with OpenAI TTS (costs about a cent), degrades parts of it (far, low, crispy), and writes a
 ground-truth file next to it:
 

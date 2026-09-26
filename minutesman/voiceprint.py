@@ -1,19 +1,4 @@
-"""Optional local speaker embeddings (SpeechBrain ECAPA-TDNN, CPU is fine).
-
-Install with `pip install -e ".[voiceprint]"`. When present, they:
-- move segments whose voice clearly belongs to another speaker. The diarizer tends to
-  merge different people recorded in the same room conditions (far, quiet, distorted),
-  because the room's sound dominates the voice,
-- merge global speakers the chunk linking split apart (same voice, two ids),
-- give every segment an acoustic confidence,
-- tie speakers to user-supplied voice samples beyond the API's 4-reference limit.
-
-All embeddable segments are re-clustered from scratch (average linkage). The existing
-labels only act as a prior: segments that chunk linking gave the same id get a small
-similarity bonus. The clusters are then mapped back onto speaker ids by talk-time overlap.
-Thresholds were tuned on phone-quality ECAPA scores (same speaker ~0.35-0.7, different
-~0.0-0.3) using the synthetic 4-speaker test meeting. Tune them on real recordings.
-"""
+# Optional ECAPA voiceprints: re-cluster segments by voice to fix speakers the diarizer merged by room
 from __future__ import annotations
 
 import logging
@@ -61,9 +46,8 @@ class Embedder:
         return v / (np.linalg.norm(v) + 1e-9)
 
 
+# Average-linkage clustering on a similarity matrix
 def cluster(sims: np.ndarray, threshold: float, cannot_link: np.ndarray | None = None) -> list[list[int]]:
-    """Average-linkage agglomerative clustering on a similarity matrix (Lance-Williams
-    updates, O(n^2) per merge; fine for the ~500 segments of a long meeting)."""
     n = len(sims)
     m = sims.astype(np.float64).copy()
     if cannot_link is not None:
@@ -87,11 +71,9 @@ def cluster(sims: np.ndarray, threshold: float, cannot_link: np.ndarray | None =
     return [members[i] for i in range(n) if alive[i]]
 
 
+# Re-assign speaker ids by voice; enrolled samples are fixed anchors that never merge
 def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
            enrolled: dict[str, np.ndarray], registry) -> None:
-    """Re-assign speaker ids in place from voice similarity. `enrolled` maps enrolled
-    speaker id -> sample embedding. Samples join the clustering as fixed anchors and two
-    different samples are never merged."""
     items = [s for s in segs if s.duration >= MIN_SECONDS]
     anchors = [(sid, e) for sid, e in enrolled.items() if sid in registry.entries]
     if not items:
@@ -107,8 +89,7 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
     cannot = is_anchor[:, None] & is_anchor[None, :] & ~same
     clusters = cluster(sims + PRIOR_BONUS * same, LINK_THRESHOLD, cannot)
 
-    # Map clusters to speaker ids: biggest (cluster, id) talk-time overlaps first, one id per
-    # cluster; a cluster with no free id is a person the diarizer never separated.
+    # Map clusters to ids by largest talk-time overlap; a cluster left over is a new person
     votes = []
     for c, mem in enumerate(clusters):
         tally: dict[str, float] = {}
@@ -158,10 +139,8 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
         registry.entries.pop(sid)
 
 
+# Segments too short to embed follow their nearest same-label neighbour
 def _assign_short(segs: list[Segment], embedded: set[str], reach: float = 15.0) -> None:
-    """Segments too short to embed follow the nearest embedded segment the diarizer gave
-    the same label in the same chunk. Ids were remapped, so keeping the old id could
-    silently hand the segment to a different person."""
     anchors = [s for s in segs if s.id in embedded]
     for s in segs:
         if s.id in embedded:

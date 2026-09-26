@@ -1,12 +1,10 @@
-"""Runtime settings. Every field can be overridden by an env var (MINUTESMAN_<NAME>)
-or a CLI flag, so the same code runs unchanged on a laptop and in a container."""
+# Settings; any field can be overridden with MINUTESMAN_<NAME> or a CLI flag
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, fields
 
-# USD list prices, fetched from developers.openai.com/api/docs/pricing (2026-09).
-# Per-minute for transcription, per 1M tokens (input, cached input, output) for LLMs.
+# USD list prices (developers.openai.com, 2026-09): per minute for ASR, per 1M tokens (in, cached, out) for LLMs
 TRANSCRIBE_PRICE_PER_MIN = {
     "gpt-transcribe": 0.0045,
     "gpt-4o-transcribe-diarize": 0.006,
@@ -65,8 +63,7 @@ class Settings:
     max_known_speakers: int = 4  # API limit for known_speaker_references
     concurrency: int = 4
 
-    # A speaker keeps a real name only if the naming confidence clears this bar;
-    # otherwise it is published as "Guest N".
+    # Minimum naming confidence to publish a real name instead of "Guest N"
     name_threshold: float = 0.75
     voiceprints: bool = True  # use local speaker embeddings if the extra is installed
 

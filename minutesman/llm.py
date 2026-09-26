@@ -1,4 +1,4 @@
-"""LLM stages: fuse the two ASR passes into Roman Urdu, then name the speakers."""
+# LLM stages: fuse both passes into Roman Urdu, then name speakers and split meetings
 from __future__ import annotations
 
 import json
@@ -44,13 +44,27 @@ you are confident it is wrong, name the better id from the ids present in this s
 
 {ROMAN_URDU_RULES}"""
 
-NAME_SYSTEM = """\
-You identify meeting participants. Given a diarized transcript with anonymous speaker ids, infer
-each speaker's real name only from explicit evidence: self-introductions ("main Bilal"), being
-addressed right before they reply ("Sara, aap batayein?" then S2 answers), or being thanked/
-named for something they said. Being mentioned in the third person is weak evidence. Never guess
-from gender, role or language. If evidence is weak or conflicting, return null with low
-confidence. Two ids should not get the same name unless evidence clearly says so."""
+ANALYZE_SYSTEM = """\
+You analyse a diarized transcript of ONE phone recording that may contain SEVERAL meetings: the
+person recording walked between meeting rooms, so there can be hallway chatter, long silences and
+different groups of people. Speaker ids (S1, S2...) are anonymous and consistent across the file.
+
+Task 1: speaker names. Infer each speaker's real name only from explicit evidence:
+self-introductions ("main Bilal"), being addressed right before they reply ("Sara, aap batayein?"
+then S2 answers), or being thanked or named for something they just said. Being mentioned in the
+third person is weak evidence. Never guess from gender, role or language. If evidence is weak or
+conflicting, return null with low confidence. Two ids should not get the same name unless the
+evidence clearly says so. Judge names PER MEETING: give one entry for every (speaker id, meeting)
+pair where that id speaks, using the meeting's position in your meetings list (-1 for lines
+outside any meeting). The diarizer can give two similar voices from different rooms the same id,
+so the same id may be a different named person in another meeting; name each one separately.
+
+Task 2: meetings. Split the recording into meetings by line numbers. Boundaries show up as
+greetings and openings ("Assalam o alaikum", "chalein shuru karte hain"), closings ("thank you
+sab ka", "theek hai phir"), long gaps (marked in the transcript), the set of speakers changing,
+and the topic changing. Lines between meetings (walking, hallway talk, small talk) belong to no
+meeting. Do not split one meeting just because the topic moves on. If the whole file is one
+meeting, return one meeting. Title each meeting with a few words about its main topic."""
 
 
 class FusedSegment(BaseModel):
@@ -68,13 +82,22 @@ class FusedChunk(BaseModel):
 
 class SpeakerName(BaseModel):
     speaker: str
+    meeting: int = Field(description="position in the meetings list, -1 outside meetings")
     name: str | None
     confidence: float
     evidence: str = Field(description="quote the lines that support the name")
 
 
-class SpeakerNames(BaseModel):
+class Meeting(BaseModel):
+    first_line: int
+    last_line: int
+    title: str = Field(description="a few words, in the language of the meeting")
+    boundary_evidence: str = Field(description="why it starts/ends here")
+
+
+class Analysis(BaseModel):
     speakers: list[SpeakerName]
+    meetings: list[Meeting]
 
 
 class Usage:
@@ -135,11 +158,19 @@ def fuse_chunk(client: OpenAI, cfg: Settings, segs: list[Segment], windows: list
     return result
 
 
-def name_speakers(client: OpenAI, cfg: Settings, segs: list[Segment], speakers: list[Speaker],
-                  usage: Usage) -> dict[str, SpeakerName]:
-    lines = "\n".join(f"[{s.start / 60:05.1f}m] {s.speaker}: {s.text}" for s in segs if s.text)
+GAP_MARK_SECONDS = 30
+
+
+# One pass over the whole transcript: speaker names and meeting boundaries
+def analyze(client: OpenAI, cfg: Settings, segs: list[Segment], speakers: list[Speaker],
+            usage: Usage) -> Analysis:
+    lines, prev_end = [], None
+    for n, s in enumerate(segs):
+        if prev_end is not None and s.start - prev_end >= GAP_MARK_SECONDS:
+            lines.append(f"--- {(s.start - prev_end) / 60:.1f} min without speech ---")
+        lines.append(f"L{n} [{int(s.start // 60):02d}:{int(s.start % 60):02d}] {s.speaker}: {s.text}")
+        prev_end = s.end
     ids = ", ".join(sp.id for sp in speakers)
-    user = (f"Meeting context: {cfg.context or 'n/a'}\nSpeaker ids: {ids}\n"
-            f"Return one entry per id.\n\nTranscript:\n{lines}")
-    out = _parse(client, cfg, NAME_SYSTEM, user, SpeakerNames, usage)
-    return {n.speaker: n for n in out.speakers}
+    user = (f"Context: {cfg.context or 'n/a'}\nSpeaker ids: {ids}\nReturn speakers entries per id and meeting. "
+            f"Lines are L0..L{len(segs) - 1}.\n\nTranscript:\n" + "\n".join(lines))
+    return _parse(client, cfg, ANALYZE_SYSTEM, user, Analysis, usage)
