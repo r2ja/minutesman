@@ -38,6 +38,18 @@ EFFORT_OUTPUT_FACTOR = {"none": 0.6, "low": 0.75, "medium": 1.0, "high": 1.6, "x
 
 
 # Projected cost from the measured token rates above
+def _renames(text: str | None) -> dict | None:
+    if not text:
+        return None
+    out = {}
+    for part in text.split(","):
+        sid, sep, name = part.partition("=")
+        if not sep or not name.strip():
+            raise SystemExit(f"--rename expects ID=Name pairs like S2=Raja (got {part!r})")
+        out[sid.strip()] = name.strip()
+    return out
+
+
 def estimate(minutes: float, cfg: Settings) -> dict:
     a = minutes * (1 + cfg.overlap_seconds / cfg.chunk_seconds) * TRANSCRIBE_PRICE_PER_MIN[cfg.diarize_model]
     b = minutes * 1.01 * TRANSCRIBE_PRICE_PER_MIN.get(cfg.transcribe_model, 0.006)
@@ -72,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-voiceprints", action="store_true")
     r.add_argument("--name-threshold", type=float)
     r.add_argument("--fresh", action="store_true", help="ignore cached API results")
+    r.add_argument("--rename", help='fix names by speaker id, e.g. "S2=Raja,S9=Hamza" (ids are in the speaker table)')
+    r.add_argument("--min-speaker-seconds", type=int, help="fold speakers with less speech than this (default 15)")
 
     e = sub.add_parser("estimate", help="projected API cost for a file or a duration")
     e.add_argument("target", help="audio file or minutes (e.g. 80)")
@@ -125,6 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         enhance=args.enhance, chunk_seconds=args.chunk_seconds, name_threshold=args.name_threshold,
         keywords=[k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else None,
         voiceprints=False if args.no_voiceprints else None,
+        min_speaker_seconds=args.min_speaker_seconds,
+        rename=_renames(args.rename),
     )
     voices = _voices(args.voice)
     if voices:

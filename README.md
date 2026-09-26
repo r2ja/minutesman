@@ -120,6 +120,11 @@ Output goes to `output/<file name>/`:
 - Otherwise names come from the conversation ("Sara, aap batayein?" followed by a reply). Weak
   evidence stays `Guest N`, and the guess is shown in the speaker table.
 
+### Fixing names afterwards
+
+The speaker table shows an id per speaker (S1, S2, ...). If you know who someone is, rerun with
+`--rename "S2=Raja,S9=Hamza"`. Everything is cached, so this is free and takes seconds.
+
 ### Useful options
 
 | Flag / env var | Default | Notes |

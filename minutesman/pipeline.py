@@ -194,6 +194,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     with ThreadPoolExecutor(cfg.concurrency) as pool:
         list(pool.map(fuse, chunks))
     segments = [s for s in segments if s.text]
+    absorb_minor_speakers(segments, cfg.min_speaker_seconds)
 
     # 7. Confidence, names, labels
     for s in segments:
@@ -219,6 +220,7 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     meetings, index_of = split_meetings(segments, analysis.meetings)
     best = resolve_names(segments, speakers, analysis.speakers, index_of, registry, cfg.name_threshold)
     assign_labels(speakers, best, segments, cfg.name_threshold)
+    apply_renames(speakers, cfg.rename)
 
     # 8. Outputs
     cost = {
@@ -331,6 +333,40 @@ def resolve_names(segments, speakers, entries, index_of: dict, registry, thresho
 
 
 # Real names only above threshold and never twice; everyone else is Guest N by first appearance
+# Speakers with only a few seconds in total are almost always fragments of real speakers; fold them into the
+# nearest speaker in time (same diarizer label first), keeping the segment's own confidence
+def absorb_minor_speakers(segments: list[Segment], min_seconds: float) -> None:
+    talk: dict[str, float] = {}
+    for s in segments:
+        talk[s.speaker] = talk.get(s.speaker, 0.0) + s.duration
+    minor = {k for k, v in talk.items() if v < min_seconds and not k.startswith("E")}
+    major = [s for s in segments if s.speaker not in minor]
+    if not minor or not major:
+        return
+    for s in segments:
+        if s.speaker not in minor:
+            continue
+
+        def gap(o, s=s):
+            return max(o.start - s.end, s.start - o.end, 0.0)
+
+        same = [o for o in major if o.chunk == s.chunk and o.local_speaker == s.local_speaker and gap(o) <= 60]
+        near = min(same or major, key=gap)
+        s.notes = (s.notes + f" fragment speaker {s.speaker} folded into {near.speaker};").strip()
+        s.speaker = near.speaker
+        s.confidence = round(min(s.confidence, 0.55), 3)
+    log.info("Folded %d fragment speakers (< %ds of speech each) into their nearest real speaker",
+             len(minor), min_seconds)
+
+
+# User overrides like {"S2": "Raja"}: the name wins over whatever the analysis inferred
+def apply_renames(speakers, rename: dict) -> None:
+    for sp in speakers:
+        if sp.id in rename:
+            sp.label, sp.name_guess, sp.name_confidence = rename[sp.id], rename[sp.id], 1.0
+            sp.name_evidence = "set by user"
+
+
 def assign_labels(speakers, names: dict, segments: list[Segment], threshold: float) -> None:
     for sp in speakers:
         n = names.get(sp.id)

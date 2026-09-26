@@ -64,7 +64,7 @@ greetings and openings ("Assalam o alaikum", "chalein shuru karte hain"), closin
 sab ka", "theek hai phir"), long gaps (marked in the transcript), the set of speakers changing,
 and the topic changing. Lines between meetings (walking, hallway talk, small talk) belong to no
 meeting. Do not split one meeting just because the topic moves on. If the whole file is one
-meeting, return one meeting. Title each meeting with a few words about its main topic."""
+meeting, return one meeting. Title each meeting with a few words about its main topic, in English or Roman Urdu (never Urdu script)."""
 
 
 class FusedSegment(BaseModel):
@@ -91,7 +91,7 @@ class SpeakerName(BaseModel):
 class Meeting(BaseModel):
     first_line: int
     last_line: int
-    title: str = Field(description="a few words, in the language of the meeting")
+    title: str = Field(description="a few words in English or Roman Urdu, never Urdu script")
     boundary_evidence: str = Field(description="why it starts/ends here")
 
 

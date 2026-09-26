@@ -38,6 +38,8 @@ def _env(name: str, default):
         return float(raw)
     if isinstance(default, list):
         return [x.strip() for x in raw.split(",") if x.strip()]
+    if isinstance(default, dict):
+        return dict(tuple(x.strip() for x in part.split("=", 1)) for part in raw.split(",") if "=" in part)
     return raw
 
 
@@ -66,6 +68,8 @@ class Settings:
 
     # Minimum naming confidence to publish a real name instead of "Guest N"
     name_threshold: float = 0.75
+    min_speaker_seconds: int = 15  # speakers with less total speech are folded into their neighbours
+    rename: dict = field(default_factory=dict)  # {"S2": "Raja"} set from --rename
     voiceprints: bool = True  # use local speaker embeddings if the extra is installed
 
     def __post_init__(self):

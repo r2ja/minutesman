@@ -61,7 +61,15 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
 - First real run ("Systems limited.m4a", 109.4 min, 12 chunks) completed 2026-09-26 21:02 PKT after the
   streaming fix and a credit top-up. Pass A ~4.5 min per chunk once streamed; voiceprints 1006 segments in
   ~11 min CPU (cached now), 25 voice groups, 314 segments moved, 14 extra speakers; analysis over 1746
-  segments took ~30 s. Output in output/Systems limited.m4a/. Not yet reviewed: likely too many speakers.
+  segments took ~30 s. Output in output/Systems limited.m4a/.
+- Review of that run: 2 meetings found (plausible), no Urdu/Devanagari script leaked, only 2.3 of 109 min
+  flagged below 0.6. Problems: 28 speakers where ~8 are real (20 "Guests" had < 5 s each: backchannels and
+  sentence tails split off by voiceprints) -> `absorb_minor_speakers` folds speakers under
+  `min_speaker_seconds` (15) into the nearest speaker (28 -> 9 on that data). Meeting titles came out in
+  Urdu script -> prompt now asks for English/Roman Urdu. The owner is the top talker but unnamed ->
+  `--rename "S2=Name"` sets names by speaker id with no API cost. Speaker ids were `len(entries)+1`, which
+  could reuse a dropped id and merge two people -> monotonic counters; voice samples use E ids.
+- Client recordings are confidential: never commit transcripts or quote their content in the repo.
 - Voiceprint embeddings are cached in work/cache/voiceprints.npz; per-segment moves log at DEBUG only.
 
 ## Next steps / open ideas

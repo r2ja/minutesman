@@ -23,9 +23,13 @@ class _Entry:
 class SpeakerRegistry:
     max_known: int = 4
     entries: dict[str, _Entry] = field(default_factory=dict)
+    issued: dict[str, int] = field(default_factory=lambda: {"S": 0, "E": 0})
 
+    # Ids only ever count up (never reused after a drop); voice samples get E ids so S numbering stays stable
     def _new(self, name: str | None = None, clip: np.ndarray | None = None) -> _Entry:
-        sid = f"S{len(self.entries) + 1}"
+        prefix = "E" if name else "S"
+        self.issued[prefix] += 1
+        sid = f"{prefix}{self.issued[prefix]}"
         spk = Speaker(id=sid)
         if name:
             spk.name_guess, spk.name_confidence, spk.enrolled = name, 1.0, True

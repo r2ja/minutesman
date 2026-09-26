@@ -1,3 +1,4 @@
+import numpy as np
 import json
 
 import pytest
@@ -286,3 +287,28 @@ def test_old_cache_without_span_is_still_used(tmp_path, meeting):
     again = FakeClient()
     pipeline.run(src, tmp_path / "out", cfg(), client=again)
     assert not any(c["model"].endswith("diarize") for c in again.audio.transcriptions.calls)
+
+
+def test_ids_never_reused_after_a_drop():
+    reg = SpeakerRegistry()
+    a, b = reg._new().speaker.id, reg._new().speaker.id
+    reg.entries.pop(a)
+    c = reg._new().speaker.id
+    assert c not in (a, b) and c in reg.entries and b in reg.entries
+    assert reg.enroll("Raja", np.zeros(16000, np.float32)).startswith("E")
+
+
+def test_fragment_speakers_fold_into_neighbours():
+    segs = [Segment("a", 0, 0, 20, "A", "x", speaker="S1", confidence=0.9),
+            Segment("b", 0, 21, 22, "A", "mm-hmm", speaker="S7", confidence=0.5),
+            Segment("c", 0, 23, 40, "B", "y", speaker="S2", confidence=0.9),
+            Segment("d", 0, 41, 42, "B", "yeah", speaker="S8", confidence=0.6)]
+    pipeline.absorb_minor_speakers(segs, 15)
+    assert [s.speaker for s in segs] == ["S1", "S1", "S2", "S2"]
+    assert "folded" in segs[1].notes
+
+
+def test_rename_overrides_labels(tmp_path, meeting):
+    src, _ = meeting
+    data = load(pipeline.run(src, tmp_path / "out", cfg(rename={"S2": "Raja"}), client=FakeClient()))
+    assert any(sp["id"] == "S2" and sp["label"] == "Raja" for sp in data["speakers"])
