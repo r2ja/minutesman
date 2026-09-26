@@ -78,7 +78,12 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
     anchors = [(sid, e) for sid, e in enrolled.items() if sid in registry.entries]
     if not items:
         return
-    vecs = [embedder.embed(slice_pcm(pcm, s.start, s.end)) for s in items] + [e for _, e in anchors]
+    vecs = []
+    for k, s in enumerate(items, 1):
+        vecs.append(embedder.embed(slice_pcm(pcm, s.start, s.end)))
+        if k % 100 == 0:
+            log.info("Voiceprints: %d/%d segments embedded", k, len(items))
+    vecs += [e for _, e in anchors]
     emb = np.stack(vecs)
     sims = emb @ emb.T
     n = len(items)

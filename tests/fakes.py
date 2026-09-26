@@ -120,6 +120,9 @@ class FakeClient:
         self.audio = SimpleNamespace(transcriptions=FakeTranscriptions())
         self.responses = FakeResponses()
 
+    def with_options(self, **kw):
+        return self
+
 
 def write_wav(path, pcm):
     path.write_bytes(audio.pcm_to_wav_bytes(pcm))

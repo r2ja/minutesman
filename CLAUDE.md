@@ -67,6 +67,9 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
   spelling. Tune voiceprint thresholds (`LINK_THRESHOLD`, `PRIOR_BONUS`) and `name_threshold` on real audio.
 - Speed: pass A is the bottleneck (sequential because of rolling speaker references). Option: run chunks in
   parallel without references and rely on overlap voting + voiceprints; measure accuracy before switching.
-- Progress visibility: pass A logs only once per chunk; a heartbeat or elapsed time per chunk would help.
+- Progress: heartbeat every 30 s while waiting on API calls, per-chunk time + ETA in pass A, counters
+  for pass B / fusion / voiceprints (`progress.py`). Pass A requests retry after 420 s (`pass_a_timeout`).
+- Ctrl+C: `cli._interruptible` runs the pipeline in a worker thread so Ctrl+C works on Windows mid-request.
+- First real run: chunks 1-2 took ~3.5 min each; chunk 3 hung past 8 min (before the timeout fix).
 - Known leftovers: very short greetings can become their own flagged "Guest"; the person recording is
   often never named (nobody addresses them right before they speak); `--voice` clips fix both.

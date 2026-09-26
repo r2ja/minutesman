@@ -132,9 +132,33 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or Path("output") / args.audio.stem
     from .pipeline import run
 
-    run(args.audio, out, cfg, voices=voices, fresh=args.fresh)
+    _interruptible(lambda: run(args.audio, out, cfg, voices=voices, fresh=args.fresh))
     print(f"\nWrote {out / 'transcript.md'} (+ .json, .srt, .txt)")
     return 0
+
+
+# Run in a worker thread so Ctrl+C works on Windows even while a network call is blocking
+def _interruptible(fn) -> None:
+    import threading
+
+    box: dict = {}
+
+    def target():
+        try:
+            fn()
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    t = threading.Thread(target=target, daemon=True)
+    t.start()
+    try:
+        while t.is_alive():
+            t.join(0.5)
+    except KeyboardInterrupt:
+        print("\nStopped. Finished steps are saved; run the same command again to resume.", flush=True)
+        os._exit(130)  # skip waiting for in-flight API calls; cache files are written atomically
+    if "error" in box:
+        raise box["error"]
 
 
 def check(cfg: Settings) -> int:

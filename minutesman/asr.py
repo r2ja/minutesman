@@ -31,7 +31,8 @@ def diarize_chunk(client: OpenAI, cfg: Settings, mp3: bytes, chunk_index: int, o
     if known_names:
         kwargs["known_speaker_names"] = known_names
         kwargs["known_speaker_references"] = known_refs
-    resp = client.audio.transcriptions.create(
+    # A 10-min chunk normally takes ~3-4 min; give up and retry sooner than the client default
+    resp = client.with_options(timeout=cfg.pass_a_timeout).audio.transcriptions.create(
         model=cfg.diarize_model,
         file=(f"chunk{chunk_index:03d}.mp3", io.BytesIO(mp3), "audio/mpeg"),
         response_format="diarized_json",

@@ -12,6 +12,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from . import asr, audio, llm, render, voiceprint
+from .progress import Counter, fmt, heartbeat
 from .config import LLM_PRICE_PER_1M, TRANSCRIBE_PRICE_PER_MIN, Settings
 from .models import Segment, Window
 from .speakers import SpeakerRegistry
@@ -65,19 +66,28 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     # 3. Pass A, sequential: each chunk is told about the speakers found so far
     per_chunk: list[list[Segment]] = []
     minutes_a = 0.0
+    sent_seconds: list[float] = []
     for ch in chunks:
         chunk_pcm = audio.slice_pcm(pcm, ch.start, ch.end)
         names, refs = registry.known_references()
         cached = cache.get(f"passA_{ch.index:03d}")
         if cached is None:
             log.info("Pass A: chunk %d/%d (%s known speaker refs)", ch.index + 1, len(chunks), len(names))
-            segs = asr.diarize_chunk(client, cfg, audio.pcm_to_mp3_bytes(chunk_pcm), ch.index,
-                                     ch.start, names, refs)
+            t_chunk = time.time()
+            with heartbeat(f"pass A chunk {ch.index + 1}/{len(chunks)}"):
+                segs = asr.diarize_chunk(client, cfg, audio.pcm_to_mp3_bytes(chunk_pcm), ch.index,
+                                         ch.start, names, refs)
             cache.put(f"passA_{ch.index:03d}", {"referenced": names, "segments": [asdict(s) for s in segs]})
             minutes_a += (ch.end - ch.start) / 60  # billed only when actually sent
+            sent_seconds.append(time.time() - t_chunk)
+            left = len(chunks) - ch.index - 1
+            eta = sum(sent_seconds) / len(sent_seconds) * left
+            log.info("Pass A: chunk %d done in %s, %d segments; ~%s left for pass A",
+                     ch.index + 1, fmt(sent_seconds[-1]), len(segs), fmt(eta))
         else:
             names = cached["referenced"]
             segs = [Segment(**s) for s in cached["segments"]]
+            log.info("Pass A: chunk %d/%d from cache", ch.index + 1, len(chunks))
         registry.link_chunk(ch.index, segs, per_chunk[-1] if per_chunk else [], names)
         registry.absorb(segs, chunk_pcm, ch.start)
         per_chunk.append(segs)
@@ -118,9 +128,15 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         cache.put(f"passB_{w.id:04d}", asdict(w))
         return (w.end - w.start + 2 * WINDOW_PAD) / 60
 
+    def pass_b_counted(w: Window) -> float:
+        billed = pass_b(w)
+        counter_b.tick()
+        return billed
+
     log.info("Pass B: %d windows", len(windows))
+    counter_b = Counter("Pass B", len(windows))
     with ThreadPoolExecutor(cfg.concurrency) as pool:
-        minutes_b = sum(pool.map(pass_b, windows))
+        minutes_b = sum(pool.map(pass_b_counted, windows))
 
     # 6. LLM fusion per chunk, in parallel
     usage = llm.Usage()
@@ -137,7 +153,8 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         else:
             before = [s for s in segments if s.end <= segs[0].start][-6:]
             tail = "\n".join(f"{s.speaker}: {s.text_a}" for s in before)
-            fused = llm.fuse_chunk(client, cfg, segs, [w for w in windows if w.chunk == ch.index], tail, usage)
+            with heartbeat(f"LLM fusion chunk {ch.index + 1}", every=60):
+                fused = llm.fuse_chunk(client, cfg, segs, [w for w in windows if w.chunk == ch.index], tail, usage)
             cache.put(key, {"ids": ids_now, "speakers": [s.speaker for s in segs],
                             "fused": {k: v.model_dump() for k, v in fused.items()}})
         present = {s.speaker for s in segs}
@@ -155,8 +172,10 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
                 s.notes = (s.notes + f" LLM moved from {s.speaker};").strip()
                 s.speaker = f.suggested_speaker
                 s.llm_confidence = 0.6  # its confidence was about the old label
+        counter_f.tick()
 
-    log.info("LLM fusion with %s", cfg.llm_model)
+    log.info("LLM fusion with %s: %d chunks", cfg.llm_model, len(chunks))
+    counter_f = Counter("LLM fusion", len(chunks))
     with ThreadPoolExecutor(cfg.concurrency) as pool:
         list(pool.map(fuse, chunks))
     segments = [s for s in segments if s.text]
@@ -178,7 +197,9 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         except ValueError:
             log.info("Cached analysis is from an older version; redoing it")
     if analysis is None:
-        analysis = llm.analyze(client, cfg, segments, speakers, usage)
+        log.info("Analysis: meetings and names over %d segments", len(segments))
+        with heartbeat("meeting/name analysis", every=60):
+            analysis = llm.analyze(client, cfg, segments, speakers, usage)
         cache.put("analysis", {"segments": fingerprint, "analysis": analysis.model_dump()})
     meetings, index_of = split_meetings(segments, analysis.meetings)
     best = resolve_names(segments, speakers, analysis.speakers, index_of, registry, cfg.name_threshold)
