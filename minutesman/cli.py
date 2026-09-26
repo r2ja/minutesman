@@ -1,0 +1,145 @@
+"""Command line entry point: `minutesman run`, `minutesman estimate`, `minutesman check`."""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+
+from . import __version__, audio, voiceprint
+from .config import LLM_PRICE_PER_1M, TRANSCRIBE_PRICE_PER_MIN, Settings
+
+
+def _load_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(Path.cwd() / ".env")
+
+
+def _voices(items: list[str]) -> dict[str, Path]:
+    out = {}
+    for item in items or []:
+        name, sep, path = item.partition("=")
+        if not sep or not Path(path).exists():
+            raise SystemExit(f"--voice expects NAME=path/to/sample.wav (got {item!r})")
+        out[name.strip()] = Path(path)
+    return out
+
+
+def estimate(minutes: float, cfg: Settings) -> dict:
+    """Projected cost. Token counts are measured-style assumptions for Urdu/English
+    meetings: ~150 spoken words/min, ~2.2 tokens/word across both passes' scripts."""
+    a = minutes * (1 + cfg.overlap_seconds / cfg.chunk_seconds) * TRANSCRIBE_PRICE_PER_MIN[cfg.diarize_model]
+    b = minutes * 1.01 * TRANSCRIBE_PRICE_PER_MIN.get(cfg.transcribe_model, 0.006)
+    words = minutes * 150
+    fuse_in = words * 2.2 * 2 * 1.6 + 2500 * minutes / (cfg.chunk_seconds / 60)  # 2 passes + JSON, prompts
+    fuse_out = words * 1.6 * 1.5  # Roman Urdu + JSON fields
+    reasoning = {"none": 0, "low": 0.2, "medium": 0.6, "high": 1.5, "xhigh": 2.5}.get(cfg.reasoning_effort, 0.6)
+    name_in = words * 1.8
+    p_in, _, p_out = LLM_PRICE_PER_1M.get(cfg.llm_model, (2.0, 0.2, 10.0))
+    llm_usd = ((fuse_in + name_in) * p_in + fuse_out * (1 + reasoning) * p_out + 3000 * p_out) / 1e6
+    return {"pass_a": round(a, 3), "pass_b": round(b, 3), "llm": round(llm_usd, 3),
+            "total": round(a + b + llm_usd, 3)}
+
+
+def main(argv: list[str] | None = None) -> int:
+    _load_dotenv()
+    cfg = Settings()
+    ap = argparse.ArgumentParser(prog="minutesman", description=__doc__)
+    ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("-v", "--verbose", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("run", help="transcribe + diarize a recording")
+    r.add_argument("audio", type=Path)
+    r.add_argument("-o", "--out", type=Path, help="output folder (default: output/<file name>)")
+    r.add_argument("--voice", action="append", metavar="NAME=FILE",
+                   help="voice sample of a known participant (5-10 s of them alone); repeatable")
+    r.add_argument("--context", help="one line about the meeting, e.g. 'Weekly sync, Acme Karachi'")
+    r.add_argument("--keywords", help="comma-separated names/terms, e.g. 'Ahmed,Sara,Jira,Q3'")
+    r.add_argument("--llm", dest="llm_model", help=f"fusion LLM (default {cfg.llm_model})")
+    r.add_argument("--effort", dest="reasoning_effort", choices=["none", "low", "medium", "high", "xhigh"])
+    r.add_argument("--enhance", choices=sorted(audio.ENHANCE_FILTERS))
+    r.add_argument("--chunk-seconds", type=int)
+    r.add_argument("--no-voiceprints", action="store_true")
+    r.add_argument("--name-threshold", type=float)
+    r.add_argument("--fresh", action="store_true", help="ignore cached API results")
+
+    e = sub.add_parser("estimate", help="projected API cost for a file or a duration")
+    e.add_argument("target", help="audio file or minutes (e.g. 80)")
+    e.add_argument("--llm", dest="llm_model")
+    e.add_argument("--effort", dest="reasoning_effort")
+
+    sub.add_parser("check", help="verify ffmpeg, API key, model access, voiceprint extra")
+
+    args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    for noisy in ("httpx", "openai", "speechbrain", "urllib3", "filelock"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    if args.cmd == "estimate":
+        cfg.update(llm_model=args.llm_model, reasoning_effort=args.reasoning_effort)
+        t = Path(args.target)
+        minutes = audio.duration(t) / 60 if t.exists() else float(args.target)
+        est = estimate(minutes, cfg)
+        print(f"{minutes:.1f} min with {cfg.llm_model} (effort {cfg.reasoning_effort}):")
+        for k, v in est.items():
+            print(f"  {k:7s} ${v:.3f}")
+        return 0
+
+    if args.cmd == "check":
+        return check(cfg)
+
+    if not args.audio.exists():
+        raise SystemExit(f"No such file: {args.audio}")
+    cfg.update(
+        context=args.context, llm_model=args.llm_model, reasoning_effort=args.reasoning_effort,
+        enhance=args.enhance, chunk_seconds=args.chunk_seconds, name_threshold=args.name_threshold,
+        keywords=[k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else None,
+        voiceprints=False if args.no_voiceprints else None,
+    )
+    voices = _voices(args.voice)
+    if voices:
+        # Names of known participants are also the most useful ASR keywords.
+        cfg.keywords = list(dict.fromkeys([*cfg.keywords, *voices]))
+    out = args.out or Path("output") / args.audio.stem
+    from .pipeline import run
+
+    run(args.audio, out, cfg, voices=voices, fresh=args.fresh)
+    print(f"\nWrote {out / 'transcript.md'} (+ .json, .srt, .txt)")
+    return 0
+
+
+def check(cfg: Settings) -> int:
+    ok = True
+    print(f"ffmpeg: {audio.ffmpeg_exe()}")
+    print(f"voiceprints extra: {'installed' if voiceprint.available() else 'not installed (optional)'}")
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("OPENAI_API_KEY: missing (put it in .env or your environment)")
+        return 1
+    from openai import OpenAI
+
+    client = OpenAI(max_retries=0)
+    try:
+        have = {m.id for m in client.models.list()}
+    except Exception as exc:  # noqa: BLE001
+        print(f"API: cannot list models: {exc}")
+        return 1
+    for m in (cfg.diarize_model, cfg.transcribe_model, cfg.llm_model):
+        print(f"model {m}: {'ok' if m in have else 'NOT AVAILABLE to this key'}")
+        ok &= m in have
+    try:
+        client.responses.create(model=cfg.llm_model, input="Reply with: ok", max_output_tokens=16)
+        print("API billing: ok")
+    except Exception as exc:  # noqa: BLE001
+        print(f"API call failed: {exc}")
+        ok = False
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
