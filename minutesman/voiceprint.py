@@ -27,18 +27,28 @@ def available() -> bool:
 
 class Embedder:
     def __init__(self, cache_dir: Path):
+        self.cache_dir = cache_dir
+        self.model = None
+
+    # Loads the model on first use, so a fully cached run never touches it
+    def _load(self):
         import torch
         from speechbrain.inference.speaker import EncoderClassifier
         from speechbrain.utils.fetching import LocalStrategy
 
         self._torch = torch
-        # COPY avoids symlinks, which fail on Windows without developer mode.
+        # COPY avoids symlinks, which fail on Windows without developer mode
         self.model = EncoderClassifier.from_hparams(
-            source="speechbrain/spkrec-ecapa-voxceleb", savedir=str(cache_dir / "ecapa"),
+            source="speechbrain/spkrec-ecapa-voxceleb", savedir=str(self.cache_dir / "ecapa"),
             run_opts={"device": "cpu"}, local_strategy=LocalStrategy.COPY,
         )
+        from .progress import quiet_libraries
+
+        quiet_libraries()  # speechbrain resets logger levels on import
 
     def embed(self, pcm: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            self._load()
         pcm = pcm[: 15 * SAMPLE_RATE]
         with self._torch.no_grad():
             e = self.model.encode_batch(self._torch.from_numpy(pcm.copy()).unsqueeze(0))
@@ -73,16 +83,12 @@ def cluster(sims: np.ndarray, threshold: float, cannot_link: np.ndarray | None =
 
 # Re-assign speaker ids by voice; enrolled samples are fixed anchors that never merge
 def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
-           enrolled: dict[str, np.ndarray], registry) -> None:
+           enrolled: dict[str, np.ndarray], registry, cache_path: Path | None = None) -> None:
     items = [s for s in segs if s.duration >= MIN_SECONDS]
     anchors = [(sid, e) for sid, e in enrolled.items() if sid in registry.entries]
     if not items:
         return
-    vecs = []
-    for k, s in enumerate(items, 1):
-        vecs.append(embedder.embed(slice_pcm(pcm, s.start, s.end)))
-        if k % 100 == 0:
-            log.info("Voiceprints: %d/%d segments embedded", k, len(items))
+    vecs = _embed_all(items, pcm, embedder, cache_path)
     vecs += [e for _, e in anchors]
     emb = np.stack(vecs)
     sims = emb @ emb.T
@@ -110,17 +116,22 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
     for c in range(len(clusters)):
         if c not in target:
             target[c] = registry._new().speaker.id
-            log.info("voiceprint: found an extra speaker %s the diarizer had merged", target[c])
+            log.debug("voiceprint: new speaker %s the diarizer had merged", target[c])
 
     label = [""] * len(prior)
     for c, mem in enumerate(clusters):
         for i in mem:
             label[i] = target[c]
+    moved = 0
     for i, s in enumerate(items):
         if label[i] != s.speaker:
-            log.info("voiceprint: %.1fs %s -> %s", s.start, s.speaker, label[i])
+            log.debug("voiceprint: %.1fs %s -> %s", s.start, s.speaker, label[i])
             s.notes = (s.notes + f" voice fits {label[i]} better than {s.speaker};").strip()
             s.speaker = label[i]
+            moved += 1
+    extra = sum(1 for c in range(len(clusters)) if target[c] not in set(prior))
+    log.info("Voiceprints: %d voice groups, %d of %d segments moved to a better-matching speaker, "
+             "%d speakers the diarizer had merged", len(clusters), moved, len(items), extra)
     _assign_short(segs, {s.id for s in items})
 
     # Acoustic confidence: how much better a segment fits its own cluster than the next best.
@@ -145,6 +156,30 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
 
 
 # Segments too short to embed follow their nearest same-label neighbour
+# Embeddings keyed by segment id and span, reused across runs
+def _embed_all(items, pcm, embedder, cache_path: Path | None) -> list[np.ndarray]:
+    keys = [f"{s.id}|{s.start}|{s.end}" for s in items]
+    known: dict[str, np.ndarray] = {}
+    if cache_path and cache_path.exists():
+        data = np.load(cache_path, allow_pickle=False)
+        known = dict(zip(data["keys"].tolist(), data["vecs"]))
+    missing = [k for k in keys if k not in known]
+    if missing:
+        log.info("Voiceprints: embedding %d segments locally (%d cached)", len(missing), len(keys) - len(missing))
+    else:
+        log.info("Voiceprints: all %d embeddings from cache", len(keys))
+    done = 0
+    for s, k in zip(items, keys):
+        if k not in known:
+            known[k] = embedder.embed(slice_pcm(pcm, s.start, s.end))
+            done += 1
+            if done % 100 == 0:
+                log.info("Voiceprints: %d/%d segments embedded", done, len(missing))
+    if cache_path and missing:
+        np.savez(cache_path, keys=np.array(list(known)), vecs=np.stack(list(known.values())))
+    return [known[k] for k in keys]
+
+
 def _assign_short(segs: list[Segment], embedded: set[str], reach: float = 15.0) -> None:
     anchors = [s for s in segs if s.id in embedded]
     for s in segs:

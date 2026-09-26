@@ -119,10 +119,9 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
 
     # 4. Voiceprints
     if cfg.voiceprints and voiceprint.available():
-        log.info("Voiceprints: embedding %d segments locally", len(segments))
         emb = voiceprint.Embedder(work / "models")
         voiceprint.refine(segments, pcm, emb, {sid: emb.embed(p) for sid, p in enrolled_pcm.items()},
-                          registry)
+                          registry, cache_path=work / "cache" / "voiceprints.npz")
     elif cfg.voiceprints:
         log.info("Voiceprints skipped (install with: pip install -e \".[voiceprint]\")")
 

@@ -58,8 +58,12 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
 
 ## Current state
 
-- First real run started 2026-09-26 18:19 PKT: 109.4 min recording, 12 chunks, estimate $2.82.
-  Pass A is sequential at roughly 2-4 min per chunk, so a full run takes ~40-60 min.
+- First real run ("Systems limited.m4a", 109.4 min, 12 chunks, estimate $2.82): after the streaming fix all
+  chunks ran steadily at ~4.5 min each. Pass A, voiceprints (1006 segments, ~5 min CPU), pass B (81 windows,
+  ~1 min) and 10/12 fusion chunks finished, then the OpenAI account ran out of credits. Everything finished
+  is cached; ~$0.50 of work remains (2 fusion chunks + analysis). The diarizer produced ~35 ids across chunks
+  and voiceprints added 14 more: check for too many Guests / over-splitting when reviewing.
+- Voiceprint embeddings are cached in work/cache/voiceprints.npz; per-segment moves log at DEBUG only.
 
 ## Next steps / open ideas
 

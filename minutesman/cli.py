@@ -88,10 +88,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-    for noisy in ("httpx", "openai", "speechbrain", "urllib3", "filelock"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-    # Keep the client's "Retrying request ..." lines so timeouts and retries are visible
-    logging.getLogger("openai._base_client").setLevel(logging.INFO)
+    from .progress import quiet_libraries
+
+    quiet_libraries()
 
     if args.cmd == "estimate":
         cfg.update(llm_model=args.llm_model, reasoning_effort=args.reasoning_effort)
@@ -160,7 +159,14 @@ def _interruptible(fn) -> None:
         print("\nStopped. Finished steps are saved; run the same command again to resume.", flush=True)
         os._exit(130)  # skip waiting for in-flight API calls; cache files are written atomically
     if "error" in box:
-        raise box["error"]
+        err = box["error"]
+        text = str(err).lower()
+        if "credit" in text or "insufficient_quota" in text or "billing" in text:
+            print("\nYour OpenAI account is out of credits. Add credits at "
+                  "https://platform.openai.com/settings/organization/billing and run the same command "
+                  "again: finished steps are saved and won't be paid for twice.", flush=True)
+            raise SystemExit(2)
+        raise err
 
 
 def check(cfg: Settings) -> int:

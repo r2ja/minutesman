@@ -9,6 +9,20 @@ from contextlib import contextmanager
 
 log = logging.getLogger("minutesman")
 HEARTBEAT_SECONDS = 30
+NOISY = ("httpx", "httpx2", "httpcore", "openai", "speechbrain", "urllib3", "filelock", "huggingface_hub")
+
+
+# Mute chatty libraries but keep the OpenAI client's "Retrying request" lines
+def quiet_libraries() -> None:
+    import os
+    import warnings
+
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    warnings.filterwarnings("ignore", module="huggingface_hub")
+    for name in NOISY:
+        logging.getLogger(name).setLevel(logging.ERROR if name == "huggingface_hub" else logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.INFO)
 
 
 # Log "still waiting" every HEARTBEAT_SECONDS until the block finishes; status() adds live detail
