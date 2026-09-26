@@ -1,11 +1,18 @@
 """Optional local speaker embeddings (SpeechBrain ECAPA-TDNN, CPU is fine).
 
 Install with `pip install -e ".[voiceprint]"`. When present, they:
-- merge global speakers the API linking split apart (same voice, two ids),
-- give every segment an acoustic confidence (how close its voice is to its speaker),
-- flag segments whose voice matches a different speaker much better,
-- match speakers to user-supplied voice samples beyond the API's 4-reference limit.
-Without the extra, the pipeline still runs; confidences then come from linking + LLM only.
+- move segments whose voice clearly belongs to another speaker. The diarizer tends to
+  merge different people recorded in the same room conditions (far, quiet, distorted),
+  because the room's sound dominates the voice,
+- merge global speakers the chunk linking split apart (same voice, two ids),
+- give every segment an acoustic confidence,
+- tie speakers to user-supplied voice samples beyond the API's 4-reference limit.
+
+All embeddable segments are re-clustered from scratch (average linkage). The existing
+labels only act as a prior: segments that chunk linking gave the same id get a small
+similarity bonus. The clusters are then mapped back onto speaker ids by talk-time overlap.
+Thresholds were tuned on phone-quality ECAPA scores (same speaker ~0.35-0.7, different
+~0.0-0.3) using the synthetic 4-speaker test meeting. Tune them on real recordings.
 """
 from __future__ import annotations
 
@@ -19,12 +26,9 @@ from .models import Segment
 
 log = logging.getLogger(__name__)
 
-MIN_SECONDS = 1.0
-MERGE_SIMILARITY = 0.72  # centroids at/above this are treated as one person...
-# ...unless the diarizer heard both in the same chunk and kept them apart: overriding
-# it then needs near-identical voices.
-MERGE_SIMILARITY_SAME_CHUNK = 0.86
-REASSIGN_MARGIN = 0.25
+MIN_SECONDS = 1.5  # shorter clips give unreliable embeddings
+LINK_THRESHOLD = 0.30  # stop merging clusters whose average similarity is below this
+PRIOR_BONUS = 0.10  # added when chunk linking already gave two segments the same id
 
 
 def available() -> bool:
@@ -57,67 +61,115 @@ class Embedder:
         return v / (np.linalg.norm(v) + 1e-9)
 
 
-def _centroid(vecs: list[np.ndarray], weights: list[float]) -> np.ndarray:
-    c = np.average(np.stack(vecs), axis=0, weights=weights)
-    return c / (np.linalg.norm(c) + 1e-9)
+def cluster(sims: np.ndarray, threshold: float, cannot_link: np.ndarray | None = None) -> list[list[int]]:
+    """Average-linkage agglomerative clustering on a similarity matrix (Lance-Williams
+    updates, O(n^2) per merge; fine for the ~500 segments of a long meeting)."""
+    n = len(sims)
+    m = sims.astype(np.float64).copy()
+    if cannot_link is not None:
+        m[cannot_link] = -np.inf
+    np.fill_diagonal(m, -np.inf)
+    alive = np.ones(n, bool)
+    size = np.ones(n)
+    members = [[i] for i in range(n)]
+    while alive.sum() > 1:
+        masked = np.where(alive[:, None] & alive[None, :], m, -np.inf)
+        a, b = np.unravel_index(np.argmax(masked), masked.shape)
+        if masked[a, b] < threshold:
+            break
+        merged = (size[a] * m[a] + size[b] * m[b]) / (size[a] + size[b])
+        m[a, :] = merged
+        m[:, a] = merged
+        m[a, a] = -np.inf
+        alive[b] = False
+        size[a] += size[b]
+        members[a] += members[b]
+    return [members[i] for i in range(n) if alive[i]]
 
 
 def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
            enrolled: dict[str, np.ndarray], registry) -> None:
-    """Refine speaker ids in place. `enrolled` maps enrolled speaker id -> sample embedding;
-    each sample counts as 10 s of that speaker's speech, so matching voices merge into it."""
-    embs: dict[str, np.ndarray] = {}
+    """Re-assign speaker ids in place from voice similarity. `enrolled` maps enrolled
+    speaker id -> sample embedding. Samples join the clustering as fixed anchors and two
+    different samples are never merged."""
+    items = [s for s in segs if s.duration >= MIN_SECONDS]
+    anchors = [(sid, e) for sid, e in enrolled.items() if sid in registry.entries]
+    if not items:
+        return
+    vecs = [embedder.embed(slice_pcm(pcm, s.start, s.end)) for s in items] + [e for _, e in anchors]
+    emb = np.stack(vecs)
+    sims = emb @ emb.T
+    n = len(items)
+    prior = [s.speaker for s in items] + [sid for sid, _ in anchors]
+    weight = [s.duration for s in items] + [30.0] * len(anchors)  # an anchor outweighs any turn
+    same = np.array([[a == b for b in prior] for a in prior])
+    is_anchor = np.array([i >= n for i in range(len(prior))])
+    cannot = is_anchor[:, None] & is_anchor[None, :] & ~same
+    clusters = cluster(sims + PRIOR_BONUS * same, LINK_THRESHOLD, cannot)
+
+    # Map clusters to speaker ids: biggest (cluster, id) talk-time overlaps first, one id per
+    # cluster; a cluster with no free id is a person the diarizer never separated.
+    votes = []
+    for c, mem in enumerate(clusters):
+        tally: dict[str, float] = {}
+        for i in mem:
+            tally[prior[i]] = tally.get(prior[i], 0.0) + weight[i]
+        votes += [(w, c, sid) for sid, w in tally.items()]
+    target: dict[int, str] = {}
+    used: set[str] = set()
+    for _, c, sid in sorted(votes, reverse=True):
+        if c not in target and sid not in used:
+            target[c] = sid
+            used.add(sid)
+    for c in range(len(clusters)):
+        if c not in target:
+            target[c] = registry._new().speaker.id
+            log.info("voiceprint: found an extra speaker %s the diarizer had merged", target[c])
+
+    label = [""] * len(prior)
+    for c, mem in enumerate(clusters):
+        for i in mem:
+            label[i] = target[c]
+    for i, s in enumerate(items):
+        if label[i] != s.speaker:
+            log.info("voiceprint: %.1fs %s -> %s", s.start, s.speaker, label[i])
+            s.notes = (s.notes + f" voice fits {label[i]} better than {s.speaker};").strip()
+            s.speaker = label[i]
+    _assign_short(segs, {s.id for s in items})
+
+    # Acoustic confidence: how much better a segment fits its own cluster than the next best.
+    for c, mem in enumerate(clusters):
+        for i in mem:
+            if i >= n:
+                continue
+            others = [j for j in mem if j != i]
+            alt = max((sims[i, m2].mean() for d, m2 in enumerate(clusters) if d != c), default=0.0)
+            if not others:
+                # Only segment of its speaker: all we know is how unlike everyone else it is.
+                conf = np.clip(0.65 - alt, 0.05, 0.6)
+            else:
+                own = sims[i, others].mean()
+                conf = np.clip(0.5 + 1.5 * (own - alt) + 0.5 * (own - 0.35), 0.05, 0.99)
+            items[i].acoustic_confidence = round(float(conf), 3)
+
+    # Drop ids that lost all their speech (their segments were someone else's).
+    active = {s.speaker for s in segs}
+    for sid in [k for k, e in registry.entries.items() if k not in active and not e.speaker.enrolled]:
+        registry.entries.pop(sid)
+
+
+def _assign_short(segs: list[Segment], embedded: set[str], reach: float = 15.0) -> None:
+    """Segments too short to embed follow the nearest embedded segment the diarizer gave
+    the same label in the same chunk. Ids were remapped, so keeping the old id could
+    silently hand the segment to a different person."""
+    anchors = [s for s in segs if s.id in embedded]
     for s in segs:
-        if s.duration >= MIN_SECONDS:
-            embs[s.id] = embedder.embed(slice_pcm(pcm, s.start, s.end))
-
-    def centroids() -> dict[str, np.ndarray]:
-        groups: dict[str, tuple[list, list]] = {
-            sid: ([e], [10.0]) for sid, e in enrolled.items() if sid in registry.entries
-        }
-        for s in segs:
-            if s.id in embs:
-                g = groups.setdefault(s.speaker, ([], []))
-                g[0].append(embs[s.id])
-                g[1].append(s.duration)
-        return {k: _centroid(v, w) for k, (v, w) in groups.items()}
-
-    # 1. Merge speakers whose voices are near-identical (greedy, most similar pair first).
-    while True:
-        cents = centroids()
-        ids = sorted(cents)
-        chunks_of = {k: {s.chunk for s in segs if s.speaker == k} for k in ids}
-        pairs = []
-        for i, a in enumerate(ids):
-            for b in ids[i + 1:]:
-                if registry.entries[a].speaker.enrolled and registry.entries[b].speaker.enrolled:
-                    continue  # two distinct voice samples: trust the user
-                bar = MERGE_SIMILARITY_SAME_CHUNK if chunks_of[a] & chunks_of[b] else MERGE_SIMILARITY
-                sim = float(cents[a] @ cents[b])
-                if sim >= bar:
-                    pairs.append((sim - bar, sim, a, b))
-        if not pairs:
-            break
-        _, sim, a, b = max(pairs)
-        ta, tb = (registry.entries[x].speaker for x in (a, b))
-        if ta.enrolled or (not tb.enrolled and ta.talk_seconds >= tb.talk_seconds):
-            keep, drop = a, b
-        else:
-            keep, drop = b, a
-        log.info("voiceprint: merging %s into %s (similarity %.2f)", drop, keep, sim)
-        registry.merge(keep, drop, segs)
-
-    # 2. Per-segment acoustic confidence; move clear outliers to the better speaker.
-    cents = centroids()
-    for s in segs:
-        v = embs.get(s.id)
-        if v is None or s.speaker not in cents:
+        if s.id in embedded:
             continue
-        own = float(v @ cents[s.speaker])
-        others = [(float(v @ c), k) for k, c in cents.items() if k != s.speaker]
-        alt_sim, alt = max(others) if others else (-1.0, None)
-        if alt and alt_sim - own > REASSIGN_MARGIN and s.duration >= 2.0:
-            s.notes = (s.notes + f" voice matches {alt} better ({alt_sim:.2f} vs {own:.2f});").strip()
-            s.speaker, own, alt_sim = alt, alt_sim, own
-        margin = own - max(alt_sim, 0.0)
-        s.acoustic_confidence = round(float(np.clip(0.5 + 0.6 * margin + 0.3 * (own - 0.5), 0.05, 0.99)), 3)
+        same = [a for a in anchors if a.chunk == s.chunk and a.local_speaker == s.local_speaker]
+        if not same:
+            continue
+        near = min(same, key=lambda a: max(a.start - s.end, s.start - a.end, 0.0))
+        if max(near.start - s.end, s.start - near.end, 0.0) <= reach and near.speaker != s.speaker:
+            s.notes = (s.notes + f" too short to fingerprint; follows neighbour {near.speaker};").strip()
+            s.speaker = near.speaker

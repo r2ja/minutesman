@@ -119,4 +119,51 @@ def test_voiceprint_refine_merges_split_speaker():
         reg.entries[s.speaker].speaker.talk_seconds = s.duration
     voiceprint.refine(segs, pcm, PitchEmbedder(), {}, reg)
     assert segs[0].speaker == segs[2].speaker != segs[1].speaker
-    assert all(s.acoustic_confidence > 0.7 for s in segs)
+    assert segs[0].acoustic_confidence > 0.9 and segs[2].acoustic_confidence > 0.9
+    assert 0.5 <= segs[1].acoustic_confidence <= 0.6  # a lone segment is never certain
+
+
+def test_voiceprint_moves_segment_the_diarizer_misattributed():
+    """Two people in the same far-away room got one label; the voice says otherwise."""
+    import numpy as np
+
+    class PitchEmbedder:
+        def embed(self, pcm):
+            from tests.fakes import FREQS, pitch
+            v = np.full(len(FREQS), 0.1, np.float32)
+            v[list(FREQS).index(pitch(pcm))] = 1
+            return v / np.linalg.norm(v)
+
+    pcm, truth = synth([("sara", 3), ("bilal", 3), ("sara", 3), ("bilal", 3), ("sara", 3), ("bilal", 3)])
+    reg = SpeakerRegistry()
+    reg._new(), reg._new()
+    # Diarizer: first Sara turn right (S1); everything after is labelled S2 (Bilal).
+    segs = [Segment(f"s{i}", 0, a, b, "A" if i == 0 else "B", w, speaker="S1" if i == 0 else "S2",
+                    link_confidence=0.7) for i, (w, a, b) in enumerate(truth)]
+    voiceprint.refine(segs, pcm, PitchEmbedder(), {}, reg)
+    assert [s.speaker for s in segs] == ["S1", "S2", "S1", "S2", "S1", "S2"]
+    assert "voice fits S1" in segs[2].notes
+
+
+def test_short_segments_follow_their_fingerprinted_neighbour():
+    from minutesman.voiceprint import _assign_short
+
+    segs = [Segment("a", 0, 0, 1.0, "D", "hiring ke", speaker="S2"),  # too short, stale id
+            Segment("b", 0, 1.2, 5.0, "D", "baare mein", speaker="S5"),  # re-clustered
+            Segment("c", 0, 5.5, 6.0, "A", "ok", speaker="S1")]  # other label: untouched
+    _assign_short(segs, {"b"})
+    assert [s.speaker for s in segs] == ["S5", "S5", "S1"]
+
+
+def test_evaluate_scores_speakers_and_text():
+    import sys
+    sys.path.insert(0, "scripts")
+    from evaluate import evaluate
+
+    truth = [{"speaker": "Ali", "condition": "clean", "start": 0, "end": 4, "reference": "haan theek hai"},
+             {"speaker": "Sara", "condition": "far", "start": 5, "end": 9, "reference": "okay done"}]
+    run = {"speakers": [{"id": "S1", "label": "Ali"}, {"id": "S2", "label": "Guest 1"}],
+           "segments": [{"speaker": "S1", "start": 0, "end": 4, "text": "Haan, theek hai."},
+                        {"speaker": "S1", "start": 5, "end": 9, "text": "okay done"}]}
+    r = evaluate(run, truth)
+    assert r["cer"] == 0.0 and r["turns_correct"] == "1/2" and r["speaker_accuracy"] == 0.5

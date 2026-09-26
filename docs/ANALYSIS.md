@@ -52,10 +52,13 @@ stitched together with, in order of strength:
    the diarizer answers with our global ids.
 2. **Overlap voting.** Chunks overlap by 30 s; a new label talking over the same seconds as a
    known speaker in the previous chunk is that speaker.
-3. **Voiceprints (optional, local, free).** SpeechBrain ECAPA-TDNN embeddings per segment:
-   merge ids that are clearly one voice, give every segment an **acoustic confidence**, and
-   flag or move segments whose voice fits another speaker much better. CPU only, ~1 GB install.
-   More than 4 recurring speakers is exactly where signal 1 runs out and this one matters.
+3. **Voiceprints (optional, local, free).** SpeechBrain ECAPA-TDNN embeddings for every segment
+   of at least 1.5 s are re-clustered from scratch (average linkage, cut at 0.30 similarity,
+   +0.10 bonus when linking already agreed). The clusters are mapped back onto speaker ids by
+   talk time, and shorter segments follow their nearest same-label neighbour. This fixes the
+   diarizer's main failure on room-hopping audio: **different people in the same degraded room
+   get one label**, because the room's sound dominates the voice. It also covers more than 4
+   recurring speakers, where signal 1 runs out. CPU only, ~1 GB install.
 
 **Names:** a final LLM pass reads the whole transcript and names a speaker only on explicit
 evidence (self-introduction, being addressed right before replying). Below 0.75 confidence
@@ -67,30 +70,67 @@ references and to the voiceprint matcher.
 voiceprint 0.5, chunk-link 0.3, LLM conversation check 0.2. Then ×0.8 if under 1 s and ×0.85
 if the original audio there is quieter than -40 dBFS. Turns under 0.6 are marked ⚠.
 
-## 4. Audio conditions
+## 4. Audio conditions and noise cancellation
 
-`--enhance light` (default) runs in ffmpeg: band-limit → **dynamic gain first** (up to 30×, so far and
-quiet talkers are lifted) → mild spectral denoise → final level trim. Order matters:
-a denoiser with a fixed noise floor erases speech sitting at -45 dBFS if it runs before the gain
-(caught by this repo's tests). Heavy denoising is avoided because it creates artifacts that hurt ASR
-more than the noise does. `strong` adds a compressor for very uneven recordings; `off` sends the audio as recorded.
+`--enhance` choices, all keeping timestamps exact:
+
+| Option | What it does | Speed (CPU) |
+|---|---|---|
+| `off` | Decode only | instant |
+| `light` (default) | Band-limit → **dynamic gain first** (up to 30×, lifts far/quiet talkers) → mild spectral denoise → level trim | instant |
+| `strong` | `light` + heavier denoise + compressor | instant |
+| `rnnoise` | Gain → **RNNoise** neural suppressor (ffmpeg `arnndn`, model downloaded on first use) | ~50× real time |
+| `deepfilter` | Gain → **DeepFilterNet 3** (open-source, near Krisp quality; binary downloaded on first use for Windows/macOS/Linux), 20 dB attenuation cap | ~0.3× real time (80 min ≈ 25 min) |
+
+Gain must come before any denoiser. A denoiser with a fixed noise floor erases speech at -45 dBFS
+if it runs first (this repo's tests caught it).
+
+**Krisp** was considered. Its SDK is enterprise-licensed and quote-only, and there is no
+self-serve file API, so it doesn't fit a personal setup. DeepFilterNet is the closest open
+equivalent.
+
+**Measured on the synthetic 4-speaker meeting** (`scripts/make_test_audio.py`, 91 s, 12 turns,
+clean/far/low/crispy stretches), scored with `scripts/evaluate.py`:
+
+| `--enhance` | Speaker accuracy (time) | Turns right | Speakers found (true 4) | Text CER |
+|---|---|---|---|---|
+| off | 0.77 | 11/12 | 5 | 3.6% |
+| light | 0.68 | 10/12 | 4 | 3.4% |
+| strong | 0.71 | 10/12 | 3 | 3.6% |
+| rnnoise | 0.62 | 9/12 | 4 | 3.2% |
+| deepfilter | 0.68 | 10/12 | 3 | 3.6% |
+| light, no voiceprints | 0.66 | 10/12 | 4 | 3.6% |
+
+Takeaways, with the caveat that this is one short synthetic file:
+- **Text is excellent regardless** (~3.5% character error against a hand-written Roman Urdu
+  reference). The two-pass + LLM design does the work, and denoising neither helps nor hurts.
+- **Neural denoising does not improve speaker attribution** and may slightly hurt it. Denoisers
+  remove the room/voice detail that diarization and voiceprints rely on. This matches published
+  findings that aggressive enhancement can hurt ASR. They stay available as options for very
+  noisy real recordings. Try `--enhance off` against the default on a real excerpt.
+- **Who-said-what is the weak spot.** The errors cluster where two similar voices share a degraded
+  room. Voiceprints recovered a speaker the diarizer had merged, and the misattributed turns
+  mostly get low confidence (0.56–0.66 overall, most below the ⚠ line) versus 0.85–0.90 for
+  clean turns. **Voice samples (`--voice`) are the strongest fix** when you know who attended.
 
 ## 5. Cost for one 80-minute recording
 
-`minutesman estimate 80` (assumes ~150 words/min):
+`minutesman estimate 80`. LLM token rates are calibrated on real runs; the 91 s test meeting
+cost $0.040–0.046 per run, matching the estimator:
 
-| LLM (effort) | Pass A diarize | Pass B text | LLM | **Total** |
+| LLM (effort medium) | Pass A diarize | Pass B text | LLM | **Total** |
 |---|---|---|---|---|
-| `gpt-6-luna` (low) | $0.50 | $0.36 | $0.03 | **≈ $0.90** |
-| **`gpt-6-sol` (medium), default** | $0.50 | $0.36 | $0.74 | **≈ $1.61** |
-| `gpt-6-astra` (medium) | $0.50 | $0.36 | $3.72 | **≈ $4.58** |
+| `gpt-6-luna` | $0.50 | $0.36 | $0.06 | **≈ $0.93** |
+| **`gpt-6-sol`, default** | $0.50 | $0.36 | $1.19 | **≈ $2.06** |
+| `gpt-6-astra` | $0.50 | $0.36 | $5.97 | **≈ $6.84** |
 
-Voiceprints cost nothing (local CPU). Reruns reuse cached API results, so after the first run,
-changing names or thresholds costs only the LLM calls that changed. A real run writes its actual
-token counts and cost to `transcript.json → meta.cost`.
+The rate is conservative: the test audio is wall-to-wall speech, and real meetings have pauses.
+Voiceprints and denoisers are free (local CPU). Reruns reuse cached API results, so changing
+names, thresholds or voiceprint settings afterwards costs only the LLM calls that change.
+Every run writes its actual token counts and cost to `transcript.json → meta.cost`.
 
-For comparison, `gpt-audio-1.5` "listening" to all 80 minutes would be roughly $1.50-3 in audio
-tokens alone before any output. That is why it isn't in the default path.
+`gpt-audio-1.5` "listening" to all 80 minutes would add roughly $1.50–3 in audio tokens
+alone, so it isn't in the default path.
 
 ## 6. Alternatives considered (outside OpenAI)
 

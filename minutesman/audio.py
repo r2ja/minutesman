@@ -6,6 +6,7 @@ import base64
 import io
 import re
 import subprocess
+import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +34,15 @@ ENHANCE_FILTERS = {
         "highpass=f=90,lowpass=f=7500,dynaudnorm=f=150:g=11:p=0.95:m=40,afftdn=nr=20:nf=-25:tn=1,"
         "acompressor=threshold=-24dB:ratio=3:attack=5:release=120,dynaudnorm=f=250:g=15:p=0.9:m=4"
     ),
+    # Neural denoisers (see denoise.py), same gain-first order.
+    "rnnoise": (
+        "highpass=f=70,lowpass=f=7800,dynaudnorm=f=150:g=15:p=0.9:m=30,"
+        "arnndn=m=rnnoise-sh.rnnn,dynaudnorm=f=250:g=15:p=0.9:m=4"
+    ),
+    "deepfilter": None,  # external binary; handled in preprocess()
 }
+_GAIN = "highpass=f=70,lowpass=f=7800,dynaudnorm=f=150:g=15:p=0.9:m=30"
+_TRIM = "dynaudnorm=f=250:g=15:p=0.9:m=4"
 
 
 def ffmpeg_exe() -> str:
@@ -42,11 +51,12 @@ def ffmpeg_exe() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
-def _run(args: list[str], input_bytes: bytes | None = None) -> bytes:
+def _run(args: list[str], input_bytes: bytes | None = None, cwd: Path | None = None) -> bytes:
     proc = subprocess.run(
         [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", *args],
         input=input_bytes,
         capture_output=True,
+        cwd=cwd,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode(errors='replace').strip()}")
@@ -70,8 +80,27 @@ def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
     if enhance not in ENHANCE_FILTERS:
         raise ValueError(f"enhance must be one of {sorted(ENHANCE_FILTERS)}")
     dst.parent.mkdir(parents=True, exist_ok=True)
+    src = src.resolve()
+    if enhance == "deepfilter":
+        from . import denoise
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pre, den = Path(tmp) / "pre48.wav", Path(tmp) / "den48.wav"
+            # -3 dB headroom: DeepFilterNet clips on full-scale input.
+            _run(["-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "48000",
+                  "-af", _GAIN + ",volume=-3dB", "-c:a", "pcm_s16le", str(pre)])
+            denoise.deepfilter(pre, den)
+            _run(["-y", "-i", str(den), "-ac", "1", "-ar", str(SAMPLE_RATE),
+                  "-af", _TRIM, "-c:a", "pcm_s16le", str(dst.resolve())])
+        return dst
+    cwd = None
+    if enhance == "rnnoise":
+        from . import denoise
+
+        # Run from the model's folder: a Windows path ("C:\...") breaks ffmpeg filter syntax.
+        cwd = denoise.rnnoise_model().parent
     _run(["-y", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
-          "-af", ENHANCE_FILTERS[enhance], "-c:a", "pcm_s16le", str(dst)])
+          "-af", ENHANCE_FILTERS[enhance], "-c:a", "pcm_s16le", str(dst.resolve())], cwd=cwd)
     return dst
 
 

@@ -16,7 +16,7 @@ Output format (illustrative):
 **[00:14:17] Sara** (0.58) ⚠: Bilal, can you share the dashboard link after the meeting?
 ```
 
-Why these models, what it costs (about **$1.60 per 80-minute recording** by default), and how
+Why these models, what it costs (about **$2 per 80-minute recording** by default, measured), and how
 speaker identity and confidence work: see **[docs/ANALYSIS.md](docs/ANALYSIS.md)**.
 
 ## Pipeline
@@ -84,9 +84,9 @@ Output goes to `output/<file name>/`:
 
 | Flag / env var | Default | Notes |
 |---|---|---|
-| `--llm` / `MINUTESMAN_LLM_MODEL` | `gpt-6-sol` | `gpt-6-luna` ≈ $0.90/80 min total, `gpt-6-astra` ≈ $4.60 |
+| `--llm` / `MINUTESMAN_LLM_MODEL` | `gpt-6-sol` | ≈ $2.06 per 80 min in total; `gpt-6-luna` ≈ $0.93, `gpt-6-astra` ≈ $6.84 |
 | `--effort` / `MINUTESMAN_REASONING_EFFORT` | `medium` | `low` is cheaper, `high` is more careful |
-| `--enhance` / `MINUTESMAN_ENHANCE` | `light` | `strong` for very uneven audio, `off` to send it as recorded |
+| `--enhance` / `MINUTESMAN_ENHANCE` | `light` | `off`, `strong`, or neural denoisers `rnnoise` / `deepfilter` (DeepFilterNet, downloaded on first use). Measured: denoising didn't improve results on the test meeting, see [ANALYSIS §4](docs/ANALYSIS.md#4-audio-conditions-and-noise-cancellation) |
 | `--name-threshold` | `0.75` | Minimum confidence to publish a real name |
 | `--no-voiceprints` | | Skip local embeddings even if installed |
 | `--chunk-seconds` | `600` | Diarization chunk length |
@@ -101,8 +101,12 @@ ground-truth file next to it:
 
 ```bash
 python scripts/make_test_audio.py --out samples/synthetic_meeting.wav
-minutesman run samples/synthetic_meeting.wav --keywords "Ahmed,Sara,Bilal,Ayesha"
+minutesman run samples/synthetic_meeting.wav -o output/synth --keywords "Ahmed,Sara,Bilal,Ayesha"
+python scripts/evaluate.py output/synth/transcript.json samples/synthetic_meeting.truth.json
 ```
+
+`evaluate.py` reports speaker accuracy (overall and per recording condition), the number of
+speakers found, and the character error rate against the Roman Urdu reference.
 
 ## Development
 

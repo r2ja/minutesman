@@ -29,7 +29,7 @@ def test_plan_chunks_rejects_bad_overlap():
         audio.plan_chunks(100, 30, 30)
 
 
-@pytest.mark.parametrize("enhance", ["off", "light", "strong"])
+@pytest.mark.parametrize("enhance", ["off", "light", "strong", "rnnoise"])
 def test_preprocess_roundtrip(tmp_path, enhance):
     pcm, _ = synth([("ali", 2.0), ("sara", 2.0)])
     src = write_wav(tmp_path / "in.wav", pcm)

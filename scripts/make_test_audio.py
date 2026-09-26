@@ -15,23 +15,48 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from minutesman.audio import ffmpeg_exe  # needs `pip install -e .`
+from minutesman.audio import duration, ffmpeg_exe  # needs `pip install -e .`
 
-# (speaker, voice, condition, text). Urdu is written in Urdu script so the TTS
-# pronounces it naturally; English stays English, mid-sentence switches included.
+# (speaker, voice, condition, text for TTS, Roman Urdu reference). Urdu is given to the
+# TTS in Urdu script so it is pronounced naturally; the reference is what a perfect
+# transcript would say. Mid-sentence language switches are included on purpose.
 SCRIPT = [
-    ("Ahmed", "onyx", "clean", "Assalam o alaikum everyone. چلیں شروع کرتے ہیں۔ Today's agenda mein teen cheezein hain: Q3 budget, hiring plan, aur client demo."),
-    ("Sara", "nova", "clean", "Thanks Ahmed. Budget ke hawale se, ہم نے marketing spend تقریباً twenty percent کم کر دیا ہے۔"),
-    ("Ahmed", "onyx", "clean", "Okay, لیکن کیا اس سے lead generation پر اثر پڑے گا؟"),
-    ("Bilal", "echo", "far", "Mera khayal hai nahi. ہم organic channels پر زیادہ focus کر رہے ہیں، and the numbers look stable so far."),
-    ("Sara", "nova", "far", "Bilal, can you share the dashboard link after the meeting? مجھے weekly trend دیکھنا ہے۔"),
-    ("Bilal", "echo", "far", "Haan bilkul, I'll send it on Slack."),
-    ("Ayesha", "shimmer", "low", "Hiring ke baare mein, ہمیں دو backend engineers چاہئیں، ideally by end of October."),
-    ("Ahmed", "onyx", "low", "Ayesha, budget approved hai? کیونکہ finance نے ابھی sign off نہیں کیا۔"),
-    ("Ayesha", "shimmer", "crispy", "Nahi abhi pending hai. I'll follow up with finance tomorrow, انشاءاللہ۔"),
-    ("Sara", "nova", "crispy", "Aur client demo Thursday ko hai, right? ہمیں staging environment کل تک ready چاہیے۔"),
-    ("Bilal", "echo", "crispy", "Staging is ready. بس ایک bug باقی ہے login page پر، I'll fix it tonight."),
-    ("Ahmed", "onyx", "clean", "Perfect. تو action items: Bilal dashboard share karega, Ayesha finance se follow up, aur demo Thursday. Thank you sab ka."),
+    ("Ahmed", "onyx", "clean",
+     "Assalam o alaikum everyone. چلیں شروع کرتے ہیں۔ Today's agenda mein teen cheezein hain: Q3 budget, hiring plan, aur client demo.",
+     "Assalam o alaikum everyone. Chalein shuru karte hain. Today's agenda mein teen cheezein hain: Q3 budget, hiring plan, aur client demo."),
+    ("Sara", "nova", "clean",
+     "Thanks Ahmed. Budget ke hawale se, ہم نے marketing spend تقریباً twenty percent کم کر دیا ہے۔",
+     "Thanks Ahmed. Budget ke hawale se, hum ne marketing spend taqreeban twenty percent kam kar diya hai."),
+    ("Ahmed", "onyx", "clean",
+     "Okay, لیکن کیا اس سے lead generation پر اثر پڑے گا؟",
+     "Okay, lekin kya is se lead generation par asar parega?"),
+    ("Bilal", "echo", "far",
+     "Mera khayal hai nahi. ہم organic channels پر زیادہ focus کر رہے ہیں، and the numbers look stable so far.",
+     "Mera khayal hai nahi. Hum organic channels par zyada focus kar rahe hain, and the numbers look stable so far."),
+    ("Sara", "nova", "far",
+     "Bilal, can you share the dashboard link after the meeting? مجھے weekly trend دیکھنا ہے۔",
+     "Bilal, can you share the dashboard link after the meeting? Mujhe weekly trend dekhna hai."),
+    ("Bilal", "echo", "far",
+     "Haan bilkul, I'll send it on Slack.",
+     "Haan bilkul, I'll send it on Slack."),
+    ("Ayesha", "shimmer", "low",
+     "Hiring ke baare mein, ہمیں دو backend engineers چاہئیں، ideally by end of October.",
+     "Hiring ke baare mein, hamein do backend engineers chahiyein, ideally by end of October."),
+    ("Ahmed", "onyx", "low",
+     "Ayesha, budget approved hai? کیونکہ finance نے ابھی sign off نہیں کیا۔",
+     "Ayesha, budget approved hai? Kyunke finance ne abhi sign off nahi kiya."),
+    ("Ayesha", "shimmer", "crispy",
+     "Nahi abhi pending hai. I'll follow up with finance tomorrow, انشاءاللہ۔",
+     "Nahi abhi pending hai. I'll follow up with finance tomorrow, InshaAllah."),
+    ("Sara", "nova", "crispy",
+     "Aur client demo Thursday ko hai, right? ہمیں staging environment کل تک ready چاہیے۔",
+     "Aur client demo Thursday ko hai, right? Hamein staging environment kal tak ready chahiye."),
+    ("Bilal", "echo", "crispy",
+     "Staging is ready. بس ایک bug باقی ہے login page پر، I'll fix it tonight.",
+     "Staging is ready. Bas aik bug baqi hai login page par, I'll fix it tonight."),
+    ("Ahmed", "onyx", "clean",
+     "Perfect. تو action items: Bilal dashboard share karega, Ayesha finance se follow up, aur demo Thursday. Thank you sab ka.",
+     "Perfect. To action items: Bilal dashboard share karega, Ayesha finance se follow up, aur demo Thursday. Thank you sab ka."),
 ]
 
 INSTRUCTIONS = (
@@ -62,7 +87,8 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         parts = []
-        for i, (speaker, voice, cond, text) in enumerate(SCRIPT):
+        t = 0.0
+        for i, (speaker, voice, cond, text, roman) in enumerate(SCRIPT):
             raw = Path(tmp) / f"{i:02d}_raw.wav"
             with client.audio.speech.with_streaming_response.create(
                 model=args.model, voice=voice, input=text,
@@ -80,7 +106,11 @@ def main() -> None:
                 check=True,
             )
             parts.append(proc)
-            truth.append({"speaker": speaker, "condition": cond, "text": text})
+            total = duration(proc)
+            speech = total - 0.6  # apad adds 0.6 s of silence after each turn
+            truth.append({"speaker": speaker, "condition": cond, "start": round(t, 2),
+                          "end": round(t + speech, 2), "text": text, "reference": roman})
+            t += total
             print(f"[{i + 1}/{len(SCRIPT)}] {speaker} ({cond})")
 
         listfile = Path(tmp) / "list.txt"

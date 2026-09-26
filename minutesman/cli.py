@@ -29,18 +29,24 @@ def _voices(items: list[str]) -> dict[str, Path]:
     return out
 
 
+# LLM tokens per minute of audio, measured on the synthetic meeting with gpt-6-sol at medium
+# effort (fusion + naming). That audio is wall-to-wall speech, so real meetings with pauses
+# usually come in lower.
+TOKENS_IN_PER_MIN = 1600
+TOKENS_OUT_PER_MIN = 1150  # includes reasoning tokens
+TOKENS_IN_PER_CHUNK = 1000  # system prompt + context, once per chunk
+EFFORT_OUTPUT_FACTOR = {"none": 0.6, "low": 0.75, "medium": 1.0, "high": 1.6, "xhigh": 2.4}
+
+
 def estimate(minutes: float, cfg: Settings) -> dict:
-    """Projected cost. Token counts are measured-style assumptions for Urdu/English
-    meetings: ~150 spoken words/min, ~2.2 tokens/word across both passes' scripts."""
+    """Projected cost, calibrated on real runs (see the constants above)."""
     a = minutes * (1 + cfg.overlap_seconds / cfg.chunk_seconds) * TRANSCRIBE_PRICE_PER_MIN[cfg.diarize_model]
     b = minutes * 1.01 * TRANSCRIBE_PRICE_PER_MIN.get(cfg.transcribe_model, 0.006)
-    words = minutes * 150
-    fuse_in = words * 2.2 * 2 * 1.6 + 2500 * minutes / (cfg.chunk_seconds / 60)  # 2 passes + JSON, prompts
-    fuse_out = words * 1.6 * 1.5  # Roman Urdu + JSON fields
-    reasoning = {"none": 0, "low": 0.2, "medium": 0.6, "high": 1.5, "xhigh": 2.5}.get(cfg.reasoning_effort, 0.6)
-    name_in = words * 1.8
+    chunks = max(1, round(minutes / (cfg.chunk_seconds / 60)))
+    tok_in = minutes * TOKENS_IN_PER_MIN + (chunks + 1) * TOKENS_IN_PER_CHUNK
+    tok_out = minutes * TOKENS_OUT_PER_MIN * EFFORT_OUTPUT_FACTOR.get(cfg.reasoning_effort, 1.0)
     p_in, _, p_out = LLM_PRICE_PER_1M.get(cfg.llm_model, (2.0, 0.2, 10.0))
-    llm_usd = ((fuse_in + name_in) * p_in + fuse_out * (1 + reasoning) * p_out + 3000 * p_out) / 1e6
+    llm_usd = (tok_in * p_in + tok_out * p_out) / 1e6
     return {"pass_a": round(a, 3), "pass_b": round(b, 3), "llm": round(llm_usd, 3),
             "total": round(a + b + llm_usd, 3)}
 
