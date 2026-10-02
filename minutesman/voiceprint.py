@@ -155,7 +155,6 @@ def refine(segs: list[Segment], pcm: np.ndarray, embedder: Embedder,
         registry.entries.pop(sid)
 
 
-# Segments too short to embed follow their nearest same-label neighbour
 # Embeddings keyed by segment id and span, reused across runs
 def _embed_all(items, pcm, embedder, cache_path: Path | None) -> list[np.ndarray]:
     keys = [f"{s.id}|{s.start}|{s.end}" for s in items]
@@ -180,6 +179,7 @@ def _embed_all(items, pcm, embedder, cache_path: Path | None) -> list[np.ndarray
     return [known[k] for k in keys]
 
 
+# Segments too short to embed follow their nearest same-label neighbour
 def _assign_short(segs: list[Segment], embedded: set[str], reach: float = 15.0) -> None:
     anchors = [s for s in segs if s.id in embedded]
     for s in segs:

@@ -370,7 +370,6 @@ def resolve_names(segments, speakers, entries, index_of: dict, registry, thresho
     return best
 
 
-# Real names only above threshold and never twice; everyone else is Guest N by first appearance
 # Speakers with a few seconds in total are fragments of real speakers: fold them into the nearest one in time
 def absorb_minor_speakers(segments: list[Segment], min_seconds: float) -> None:
     talk: dict[str, float] = {}
@@ -406,6 +405,7 @@ def apply_renames(speakers, rename: dict) -> None:
             sp.name_evidence = "set by user"
 
 
+# Real names only above threshold and never twice; everyone else is Guest N by first appearance
 def assign_labels(speakers, names: dict, segments: list[Segment], threshold: float) -> None:
     for sp in speakers:
         n = names.get(sp.id)

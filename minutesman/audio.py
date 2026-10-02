@@ -103,7 +103,6 @@ def shrink(src: Path, dst: Path, bitrate: str = "32k") -> Path:
     return dst
 
 
-# Whole file as float32 mono at 16 kHz
 # Cut [start, end) seconds to a 16 kHz mono WAV, e.g. a voice sample for --voice
 def clip(src: Path, dst: Path, start: float, end: float) -> Path:
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +111,7 @@ def clip(src: Path, dst: Path, start: float, end: float) -> Path:
     return dst
 
 
+# Whole file as float32 mono at 16 kHz
 def load_pcm(path: Path) -> np.ndarray:
     raw = _run(["-i", str(path), "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"])
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
