@@ -27,12 +27,12 @@ def turns(segments: list[Segment], max_gap: float = 2.0) -> list[dict]:
         last = out[-1] if out else None
         low = s.confidence < LOW_CONFIDENCE
         if (last and last["speaker"] == s.speaker and last["meeting"] == s.meeting
-                and s.start - last["end"] <= max_gap and low == prev_low):
+                and last["off"] == s.off_reason and s.start - last["end"] <= max_gap and low == prev_low):
             last["end"] = s.end
             last["texts"].append(s.text)
             last["confs"].append((s.confidence, s.duration))
         else:
-            out.append({"speaker": s.speaker, "meeting": s.meeting, "start": s.start, "end": s.end,
+            out.append({"speaker": s.speaker, "meeting": s.meeting, "off": s.off_reason, "start": s.start, "end": s.end,
                         "texts": [s.text], "confs": [(s.confidence, s.duration)]})
         prev_low = low
     for t in out:
@@ -41,6 +41,49 @@ def turns(segments: list[Segment], max_gap: float = 2.0) -> list[dict]:
         t["text"] = " ".join(x for x in t.pop("texts") if x)
         del t["confs"]
     return out
+
+
+# Transcript sections; full=False collapses off-meeting stretches into one marker line each
+def _body(tt: list[dict], meetings: list[dict], label: dict, full: bool) -> list[str]:
+    md: list[str] = []
+    if len(meetings) <= 1:
+        md += ["## Transcript", ""]
+    current, prev_end, hidden = None, None, []
+
+    def flush():
+        if hidden:
+            md.extend([f"*⋯ {ts(hidden[0]['start'])}–{ts(hidden[-1]['end'])} left out: {hidden[0]['off']} "
+                       f"({len(hidden)} turns, see transcript_full.md)*", ""])
+            hidden.clear()
+
+    for t in tt:
+        if t["off"] and not full:
+            if hidden and hidden[-1]["off"] != t["off"]:
+                flush()
+            hidden.append(t)
+            prev_end = t["end"]
+            continue
+        flush()
+        section = "off" if t["off"] else t["meeting"]
+        if len(meetings) > 1 or t["off"] or current == "off":
+            if section != current:
+                current = section
+                if t["off"]:
+                    md += [f"## Off-meeting: {t['off']}", ""]
+                elif current >= 0:
+                    m = meetings[current]
+                    md += [f"## Meeting {current + 1}: {m['title']} ({ts(m['start'])}–{ts(m['end'])})", ""]
+                else:
+                    md += ["## Between meetings", ""]
+        if prev_end is not None and t["start"] - prev_end >= GAP_NOTE_SECONDS:
+            md += [f"*… {(t['start'] - prev_end) / 60:.1f} min without speech …*", ""]
+        prev_end = t["end"]
+        flag = " ⚠" if t["confidence"] < LOW_CONFIDENCE else ""
+        md.append(f"**[{ts(t['start'])}] {label.get(t['speaker'], t['speaker'])}** "
+                  f"({t['confidence']:.2f}){flag}: {t['text']}")
+        md.append("")
+    flush()
+    return md
 
 
 def write_all(out_dir: Path, segments: list[Segment], speakers: list[Speaker], meta: dict) -> None:
@@ -66,32 +109,25 @@ def write_all(out_dir: Path, segments: list[Segment], speakers: list[Speaker], m
         for m in meetings:
             who = ", ".join(label.get(p, p) for p in m["participants"])
             md.append(f"| {m['index'] + 1} | {ts(m['start'])}–{ts(m['end'])} | {m['title']} | {who} |")
+    off = meta.get("off_meeting") or []
+    if off:
+        md += ["", "## Left out of the transcript", "",
+               "Not part of any meeting; the full text is in transcript_full.md.", "",
+               "| Time | Why |", "|---|---|"]
+        md += [f"| {ts(o['start'])}–{ts(o['end'])} | {o['reason']} |" for o in off]
     md += ["", "Speaker confidence in brackets; ⚠ marks turns below "
            f"{LOW_CONFIDENCE:.0%}.", ""]
-    if len(meetings) <= 1:
-        md += ["## Transcript", ""]
-    current, prev_end = None, None
-    for t in tt:
-        if len(meetings) > 1 and t["meeting"] != current:
-            current = t["meeting"]
-            if current >= 0:
-                m = meetings[current]
-                md += [f"## Meeting {current + 1}: {m['title']} ({ts(m['start'])}–{ts(m['end'])})", ""]
-            else:
-                md += ["## Between meetings", ""]
-        if prev_end is not None and t["start"] - prev_end >= GAP_NOTE_SECONDS:
-            md += [f"*… {(t['start'] - prev_end) / 60:.1f} min without speech …*", ""]
-        prev_end = t["end"]
-        flag = " ⚠" if t["confidence"] < LOW_CONFIDENCE else ""
-        md.append(f"**[{ts(t['start'])}] {label.get(t['speaker'], t['speaker'])}** "
-                  f"({t['confidence']:.2f}){flag}: {t['text']}")
-        md.append("")
-    (out_dir / "transcript.md").write_text("\n".join(md), encoding="utf-8")
+    header = list(md)
+    clean = _body(tt, meetings, label, full=False)
+    (out_dir / "transcript.md").write_text("\n".join(header + clean), encoding="utf-8")
+    (out_dir / "transcript_full.md").write_text("\n".join(header + _body(tt, meetings, label, full=True)),
+                                               encoding="utf-8")
+    tt_clean = [t for t in tt if not t["off"]]
 
     # Plain text
     (out_dir / "transcript.txt").write_text(
         "\n".join(f"[{ts(t['start'])}] {label.get(t['speaker'], t['speaker'])} ({t['confidence']:.2f}): "
-                  f"{t['text']}" for t in tt) + "\n", encoding="utf-8")
+                  f"{t['text']}" for t in tt_clean) + "\n", encoding="utf-8")
 
     # SRT
     srt = []

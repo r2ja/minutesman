@@ -92,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--name-threshold", type=float)
     r.add_argument("--fresh", action="store_true", help="ignore cached API results")
     r.add_argument("--rename", help='fix names by speaker id, e.g. "S2=Raja,S9=Hamza" (ids are in the speaker table)')
+    r.add_argument("--start", help="process from this time, e.g. 2:30")
+    r.add_argument("--end", help="stop at this time, e.g. 1:52:00 (if recording was left running)")
     r.add_argument("--min-speaker-seconds", type=int, help="fold speakers with less speech than this (default 15)")
 
     e = sub.add_parser("estimate", help="projected API cost for a file or a duration")
@@ -161,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         keywords=[k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else None,
         voiceprints=False if args.no_voiceprints else None,
         min_speaker_seconds=args.min_speaker_seconds,
+        trim_start=_seconds(args.start) if args.start else None,
+        trim_end=_seconds(args.end) if args.end else None,
         rename=_renames(args.rename),
     )
     voices = _voices(args.voice)

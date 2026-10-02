@@ -47,7 +47,10 @@ you are confident it is wrong, name the better id from the ids present in this s
 ANALYZE_SYSTEM = """\
 You analyse a diarized transcript of ONE phone recording that may contain SEVERAL meetings: the
 person recording walked between meeting rooms, so there can be hallway chatter, long silences and
-different groups of people. Speaker ids (S1, S2...) are anonymous and consistent across the file.
+different groups of people. The recording phone also travels with its owner: it can capture the owner
+stepping out, taking a phone or Teams call on the same phone, side conversations, and a long stretch
+after the last meeting ended because recording was not stopped. Speaker ids (S1, S2...) are anonymous
+and consistent across the file.
 
 Task 1: speaker names. Infer each speaker's real name only from explicit evidence:
 self-introductions ("main Bilal"), being addressed right before they reply ("Sara, aap batayein?"
@@ -64,7 +67,14 @@ greetings and openings ("Assalam o alaikum", "chalein shuru karte hain"), closin
 sab ka", "theek hai phir"), long gaps (marked in the transcript), the set of speakers changing,
 and the topic changing. Lines between meetings (walking, hallway talk, small talk) belong to no
 meeting. Do not split one meeting just because the topic moves on. If the whole file is one
-meeting, return one meeting. Title each meeting with a few words about its main topic, in English or Roman Urdu (never Urdu script)."""
+meeting, return one meeting. Title each meeting with a few words about its main topic, in English or Roman Urdu (never Urdu script).
+
+Task 3: off-meeting stretches. List every stretch of lines that is NOT part of a meeting, with a short
+reason: "recorder on a separate phone/Teams call", "stepped out of the room", "small talk before the
+meeting", "after the meeting ended (recording left running)", "unrelated side conversation". A side call
+usually shows as one voice talking to someone who is not in the room, about other work, while the
+meeting's voices disappear. Meetings and off-meeting stretches must not overlap. If the meeting simply
+continues after a short interruption, keep only the interruption out."""
 
 
 class FusedSegment(BaseModel):
@@ -95,9 +105,16 @@ class Meeting(BaseModel):
     boundary_evidence: str = Field(description="why it starts/ends here")
 
 
+class OffMeeting(BaseModel):
+    first_line: int
+    last_line: int
+    reason: str = Field(description="a few words, e.g. recorder on a separate Teams call")
+
+
 class Analysis(BaseModel):
     speakers: list[SpeakerName]
     meetings: list[Meeting]
+    off_meeting: list[OffMeeting]
 
 
 class Usage:

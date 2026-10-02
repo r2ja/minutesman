@@ -299,12 +299,13 @@ def test_ids_never_reused_after_a_drop():
 
 
 def test_fragment_speakers_fold_into_neighbours():
-    segs = [Segment("a", 0, 0, 20, "A", "x", speaker="S1", confidence=0.9),
-            Segment("b", 0, 21, 22, "A", "mm-hmm", speaker="S7", confidence=0.5),
-            Segment("c", 0, 23, 40, "B", "y", speaker="S2", confidence=0.9),
-            Segment("d", 0, 41, 42, "B", "yeah", speaker="S8", confidence=0.6)]
+    segs = [Segment("a", 0, 0, 200, "A", "x", speaker="S1", confidence=0.9),
+            Segment("b", 0, 201, 202, "A", "mm-hmm", speaker="S7", confidence=0.5),
+            Segment("c", 0, 203, 400, "B", "y", speaker="S2", confidence=0.9),
+            Segment("d", 0, 401, 402, "B", "yeah", speaker="S8", confidence=0.6),
+            Segment("e", 0, 403, 415, "C", "short but real", speaker="S9", confidence=0.8)]
     pipeline.absorb_minor_speakers(segs, 15)
-    assert [s.speaker for s in segs] == ["S1", "S1", "S2", "S2"]
+    assert [s.speaker for s in segs] == ["S1", "S1", "S2", "S2", "S9"]
     assert "folded" in segs[1].notes
 
 
@@ -312,3 +313,29 @@ def test_rename_overrides_labels(tmp_path, meeting):
     src, _ = meeting
     data = load(pipeline.run(src, tmp_path / "out", cfg(rename={"S2": "Raja"}), client=FakeClient()))
     assert any(sp["id"] == "S2" and sp["label"] == "Raja" for sp in data["speakers"])
+
+
+def test_off_meeting_lines_are_hidden_in_clean_transcript(tmp_path):
+    from minutesman import llm, render
+    from minutesman.models import Speaker
+
+    segs = [Segment(f"s{i}", 0, i * 10, i * 10 + 5, "A", "x", speaker="S1", confidence=0.9,
+                    text=t) for i, t in enumerate(["budget review", "haan ji, Teams pe call hai", "wapis aa gaya"])]
+    spans = pipeline.mark_off_meeting(segs, [llm.OffMeeting(first_line=1, last_line=1, reason="side Teams call")])
+    meetings, _ = pipeline.split_meetings(segs, [llm.Meeting(first_line=0, last_line=2, title="T",
+                                                             boundary_evidence="")])
+    meta = {"source": "x.m4a", "duration_seconds": 30, "cost": {"usd": 0}, "meetings": meetings, "off_meeting": spans}
+    render.write_all(tmp_path, segs, [Speaker(id="S1", label="Raja", talk_seconds=15)], meta)
+    clean = (tmp_path / "transcript.md").read_text(encoding="utf-8")
+    full = (tmp_path / "transcript_full.md").read_text(encoding="utf-8")
+    assert "Teams pe call" not in clean and "left out: side Teams call" in clean
+    assert "Teams pe call" in full and "budget review" in clean and "wapis aa gaya" in clean
+    assert segs[1].meeting == -1 and segs[2].meeting == 0
+
+
+def test_trim_keeps_original_timestamps(tmp_path, meeting):
+    src, _ = meeting
+    client = FakeClient()
+    data = load(pipeline.run(src, tmp_path / "out", cfg(trim_start=20.0, trim_end=80.0), client=client))
+    assert data["segments"] and min(s["start"] for s in data["segments"]) >= 20.0
+    assert max(s["end"] for s in data["segments"]) <= 80.5

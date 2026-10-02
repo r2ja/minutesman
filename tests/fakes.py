@@ -135,7 +135,11 @@ class FakeResponses:
         ends = [s - 1 for s in starts[1:]] + [len(lines) - 1]
         meetings = [llm.Meeting(first_line=a, last_line=b, title=f"M{k}", boundary_evidence="test")
                     for k, (a, b) in enumerate(zip(starts, ends))]
-        return SimpleNamespace(output_parsed=llm.Analysis(speakers=out, meetings=meetings), usage=usage)
+        off = [llm.OffMeeting(first_line=int(ln.split(" ", 1)[0][1:]), last_line=int(ln.split(" ", 1)[0][1:]),
+                              reason="recorder on a separate Teams call")
+               for ln in lines if "teams" in ln.lower()]
+        return SimpleNamespace(output_parsed=llm.Analysis(speakers=out, meetings=meetings, off_meeting=off),
+                               usage=usage)
 
 
 class FakeClient:

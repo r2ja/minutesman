@@ -45,15 +45,19 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     work = out_dir / "work"
     if fresh and work.exists():
         shutil.rmtree(work)
-    cache = _Cache(work / "cache")
+    # A different start trim shifts every timestamp, so it gets its own cache
+    start = cfg.trim_start or 0.0
+    cache = _Cache(work / ("cache" if not start else f"cache_from_{int(start)}s"))
 
     # 1. Audio
-    enhanced_path = work / f"enhanced_{cfg.enhance}.wav"
+    tag = "" if not (start or cfg.trim_end) else f"_{int(start)}-{int(cfg.trim_end or 0)}"
+    enhanced_path = work / f"enhanced_{cfg.enhance}{tag}.wav"
     if not enhanced_path.exists():
         log.info("Preprocessing audio (enhance=%s)", cfg.enhance)
-        audio.preprocess(src, enhanced_path, cfg.enhance)
+        audio.preprocess(src, enhanced_path, cfg.enhance, start, cfg.trim_end)
     pcm = audio.load_pcm(enhanced_path)
     raw_pcm = audio.load_pcm(src)  # loudness is judged on the untouched recording
+    raw_pcm = audio.slice_pcm(raw_pcm, start, cfg.trim_end or len(raw_pcm) / audio.SAMPLE_RATE)
     total = len(pcm) / audio.SAMPLE_RATE
     chunks = audio.plan_chunks(total, cfg.chunk_seconds, cfg.overlap_seconds)
     log.info("Audio: %.1f min, %d chunk(s)", total / 60, len(chunks))
@@ -217,10 +221,18 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
         with heartbeat("meeting/name analysis", every=60):
             analysis = llm.analyze(client, cfg, segments, speakers, usage)
         cache.put("analysis", {"segments": fingerprint, "analysis": analysis.model_dump()})
+    off_spans = mark_off_meeting(segments, analysis.off_meeting)
     meetings, index_of = split_meetings(segments, analysis.meetings)
     best = resolve_names(segments, speakers, analysis.speakers, index_of, registry, cfg.name_threshold)
     assign_labels(speakers, best, segments, cfg.name_threshold)
     apply_renames(speakers, cfg.rename)
+    for m in meetings:
+        # Recount after name resolution, which can split one id into two people
+        talk: dict[str, float] = {}
+        for seg in segments:
+            if seg.meeting == m["index"]:
+                talk[seg.speaker] = talk.get(seg.speaker, 0.0) + seg.duration
+        m["participants"] = sorted(talk, key=talk.get, reverse=True)
 
     # 8. Outputs
     cost = {
@@ -236,8 +248,11 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     meta = {
         "source": str(src), "duration_seconds": round(total, 1), "settings": asdict(cfg),
         "voiceprints": cfg.voiceprints and voiceprint.available(), "cost": cost, "meetings": meetings,
+        "off_meeting": off_spans, "trim": [start, cfg.trim_end],
         "elapsed_seconds": round(time.time() - t0, 1),
     }
+    if start:
+        shift_timeline(segments, meetings, off_spans, start)
     render.write_all(out_dir, segments, speakers, meta)
     log.info("Done in %.0fs, est. cost $%.3f -> %s", meta["elapsed_seconds"], cost["usd"], out_dir)
     return out_dir
@@ -279,9 +294,9 @@ def split_meetings(segments: list[Segment], proposed) -> list[dict]:
     meetings, index_of = [], {-1: -1}
     for k, (a, b, i, m) in enumerate(kept):
         index_of[i] = k
-        for s in segments[a:b + 1]:
+        members = [s for s in segments[a:b + 1] if not s.off_reason] or segments[a:b + 1]
+        for s in members:
             s.meeting = k
-        members = segments[a:b + 1]
         talk: dict[str, float] = {}
         for s in members:
             talk[s.speaker] = talk.get(s.speaker, 0.0) + s.duration
@@ -292,6 +307,29 @@ def split_meetings(segments: list[Segment], proposed) -> list[dict]:
             "boundary_evidence": m.boundary_evidence if m else "",
         })
     return meetings, index_of
+
+
+# Tag lines the analysis put outside the meetings; returns [{start, end, reason}] for the report
+def mark_off_meeting(segments: list[Segment], spans) -> list[dict]:
+    out = []
+    n = len(segments)
+    for sp in sorted(spans, key=lambda x: x.first_line):
+        a, b = max(0, sp.first_line), min(n - 1, sp.last_line)
+        if a > b or a >= n:
+            continue
+        for s in segments[a:b + 1]:
+            s.off_reason = sp.reason.strip() or "outside the meetings"
+        out.append({"start": segments[a].start, "end": segments[b].end, "reason": segments[a].off_reason,
+                    "lines": b - a + 1})
+    return out
+
+
+# Move everything back onto the original recording's clock after a start trim
+def shift_timeline(segments: list[Segment], meetings: list[dict], off_spans: list[dict], offset: float) -> None:
+    for s in segments:
+        s.start, s.end = round(s.start + offset, 2), round(s.end + offset, 2)
+    for m in [*meetings, *off_spans]:
+        m["start"], m["end"] = round(m["start"] + offset, 2), round(m["end"] + offset, 2)
 
 
 # Split an id that is confidently a different named person in different meetings; return best name per id
@@ -333,12 +371,13 @@ def resolve_names(segments, speakers, entries, index_of: dict, registry, thresho
 
 
 # Real names only above threshold and never twice; everyone else is Guest N by first appearance
-# Speakers with only a few seconds in total are almost always fragments of real speakers; fold them into the
-# nearest speaker in time (same diarizer label first), keeping the segment's own confidence
+# Speakers with a few seconds in total are fragments of real speakers: fold them into the nearest one in time
 def absorb_minor_speakers(segments: list[Segment], min_seconds: float) -> None:
     talk: dict[str, float] = {}
     for s in segments:
         talk[s.speaker] = talk.get(s.speaker, 0.0) + s.duration
+    # Short recordings have short real speakers, so the bar is at most 2% of all speech
+    min_seconds = min(min_seconds, 0.02 * sum(talk.values()))
     minor = {k for k, v in talk.items() if v < min_seconds and not k.startswith("E")}
     major = [s for s in segments if s.speaker not in minor]
     if not minor or not major:
@@ -355,7 +394,7 @@ def absorb_minor_speakers(segments: list[Segment], min_seconds: float) -> None:
         s.notes = (s.notes + f" fragment speaker {s.speaker} folded into {near.speaker};").strip()
         s.speaker = near.speaker
         s.confidence = round(min(s.confidence, 0.55), 3)
-    log.info("Folded %d fragment speakers (< %ds of speech each) into their nearest real speaker",
+    log.info("Folded %d fragment speakers (< %.0fs of speech each) into their nearest real speaker",
              len(minor), min_seconds)
 
 

@@ -68,6 +68,8 @@ class Settings:
 
     # Minimum naming confidence to publish a real name instead of "Guest N"
     name_threshold: float = 0.75
+    trim_start: float = 0.0  # seconds; process only part of the recording
+    trim_end: float = 0.0  # 0 = to the end
     min_speaker_seconds: int = 15  # speakers with less total speech are folded into their neighbours
     rename: dict = field(default_factory=dict)  # {"S2": "Raja"} set from --rename
     voiceprints: bool = True  # use local speaker embeddings if the extra is installed

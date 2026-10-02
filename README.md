@@ -36,9 +36,10 @@ audio ─► ffmpeg enhance (gain first, mild denoise) ─► 10-min chunks, 30 
 
 1. Install Python 3.10+ from python.org and tick **"Add python.exe to PATH"**.
 2. Double-click **`setup.bat`** in the repo folder and paste your OpenAI API key when asked.
-3. **Drag your recording onto `transcribe.bat`.** It shows the cost estimate, transcribes, and opens
-   `output\<file name>\transcript.md` when done. If it stops midway, run it again: finished
-   steps are cached.
+3. **Drag your recording onto `transcribe.bat`.** It asks a few optional questions (meeting context,
+   names and terms, and when the meeting started/ended if the recording runs longer), shows the cost
+   estimate, transcribes, and opens `output\<file name>\transcript.md` when done. If it stops midway,
+   drag it on again and reuse your answers: finished steps are cached.
 
 Options still work from a terminal: `transcribe.bat "C:\path\to\file.m4a" --keywords "Ahmed,Sara"`.
 
@@ -128,6 +129,15 @@ Find a spot in a transcript where one person talks alone for 5-10 s and cut it:
 minutesman clip recording.m4a 0:54 1:04 -o voices/raja.wav
 minutesman run next.m4a --voice "Raja=voices/raja.wav"
 ```
+
+### Side calls, stepping out, recording left running
+
+The analysis marks stretches that are not part of a meeting (a phone or Teams call on the recording
+phone, stepping out, small talk, the tail after the meeting ended) and gives each a reason.
+`transcript.md` shows only the meetings, with a one-line "left out" marker per stretch;
+`transcript_full.md` has everything. If you know the meeting ended long before the recording did,
+`--end 1:52:00` (or `--start 2:30`) skips that audio entirely, which also saves time and money.
+Timestamps always refer to the original recording.
 
 ### Fixing names afterwards
 

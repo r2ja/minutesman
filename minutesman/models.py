@@ -14,6 +14,7 @@ class Segment:
     speaker: str = ""  # global speaker id, e.g. "S1"
     window: int = -1  # pass-B window this segment belongs to
     meeting: int = -1  # index into meta["meetings"]; -1 = between meetings
+    off_reason: str = ""  # why this line is outside the meetings (side call, after the meeting...)
     level_dbfs: float = 0.0  # loudness in the original (un-enhanced) recording
     link_confidence: float = 0.0  # how sure the chunk->global speaker link is
     acoustic_confidence: float | None = None  # voiceprint similarity, if available

@@ -67,7 +67,8 @@ def duration(path: Path) -> float:
 
 
 # Decode to 16 kHz mono WAV with the chosen cleanup
-def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
+def preprocess(src: Path, dst: Path, enhance: str = "light", start: float = 0.0, end: float | None = None) -> Path:
+    trim = (["-ss", f"{start:.2f}"] if start else []) + (["-to", f"{end:.2f}"] if end else [])
     if enhance not in ENHANCE_FILTERS:
         raise ValueError(f"enhance must be one of {sorted(ENHANCE_FILTERS)}")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +79,7 @@ def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
         with tempfile.TemporaryDirectory() as tmp:
             pre, den = Path(tmp) / "pre48.wav", Path(tmp) / "den48.wav"
             # -3 dB headroom: DeepFilterNet clips on full-scale input.
-            _run(["-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "48000",
+            _run(["-y", *trim, "-i", str(src), "-vn", "-ac", "1", "-ar", "48000",
                   "-af", _GAIN + ",volume=-3dB", "-c:a", "pcm_s16le", str(pre)])
             denoise.deepfilter(pre, den)
             _run(["-y", "-i", str(den), "-ac", "1", "-ar", str(SAMPLE_RATE),
@@ -90,7 +91,7 @@ def preprocess(src: Path, dst: Path, enhance: str = "light") -> Path:
 
         # Run from the model's folder: a Windows path ("C:\...") breaks ffmpeg filter syntax.
         cwd = denoise.rnnoise_model().parent
-    _run(["-y", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
+    _run(["-y", *trim, "-i", str(src), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE),
           "-af", ENHANCE_FILTERS[enhance], "-c:a", "pcm_s16le", str(dst.resolve())], cwd=cwd)
     return dst
 

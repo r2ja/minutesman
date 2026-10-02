@@ -69,6 +69,13 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
   Urdu script -> prompt now asks for English/Roman Urdu. The owner is the top talker but unnamed ->
   `--rename "S2=Name"` sets names by speaker id with no API cost. Speaker ids were `len(entries)+1`, which
   could reuse a dropped id and merge two people -> monotonic counters; voice samples use E ids.
+- Off-meeting stretches (side phone/Teams calls on the recording phone, stepping out, tail after the meeting):
+  `llm.analyze` returns `off_meeting` spans with a reason; `pipeline.mark_off_meeting` tags segments
+  (`off_reason`). transcript.md/.txt hide them behind one-line markers, transcript_full.md keeps all.
+  `--start/--end` trim the audio (own cache dir per start trim; timestamps shifted back to the original).
+  transcribe.bat asks for context, names/terms, end/start time and saves answers in run_options.txt.
+- Fragment folding uses min(15 s, 2% of all speech) so short recordings keep short real speakers;
+  meeting participants are recounted after name resolution (it can split ids).
 - Client recordings are confidential: never commit transcripts or quote their content in the repo.
 - Voiceprint embeddings are cached in work/cache/voiceprints.npz; per-segment moves log at DEBUG only.
 
