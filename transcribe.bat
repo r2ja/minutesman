@@ -7,6 +7,12 @@ set "OPTS="
 set "SAVED=output\%~n1\run_options.txt"
 REM Options typed after the file name skip the questions
 if not "%~2"=="" goto run
+REM A local defaults.txt (git-ignored) holds options to use for every recording, no questions asked
+if exist defaults.txt (
+  set /p OPTS=<defaults.txt
+  call echo Using defaults.txt: %%OPTS%%
+  goto run
+)
 if exist "%SAVED%" (
   set /p OPTS=<"%SAVED%"
   call echo Previous answers for this recording: %%OPTS%%

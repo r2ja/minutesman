@@ -1,6 +1,7 @@
 # Pipeline: enhance, diarize, link speakers, voiceprints, transcribe, fuse, analyze, write (API results cached)
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -208,7 +209,8 @@ def run(src: Path, out_dir: Path, cfg: Settings, voices: dict[str, Path] | None 
     for sp in speakers:
         sp.talk_seconds = round(sum(s.duration for s in segments if s.speaker == sp.id), 1)
 
-    fingerprint = [[s.id, s.speaker, s.text] for s in segments]
+    # Includes the analysis instructions, so a prompt change re-runs this step
+    fingerprint = [[s.id, s.speaker, s.text] for s in segments] + [hashlib.sha1(llm.ANALYZE_SYSTEM.encode()).hexdigest()]
     cached = cache.get("analysis")
     analysis = None
     if cached and cached["segments"] == fingerprint:

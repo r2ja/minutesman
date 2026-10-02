@@ -69,12 +69,14 @@ and the topic changing. Lines between meetings (walking, hallway talk, small tal
 meeting. Do not split one meeting just because the topic moves on. If the whole file is one
 meeting, return one meeting. Title each meeting with a few words about its main topic, in English or Roman Urdu (never Urdu script).
 
-Task 3: off-meeting stretches. List every stretch of lines that is NOT part of a meeting, with a short
-reason: "recorder on a separate phone/Teams call", "stepped out of the room", "small talk before the
-meeting", "after the meeting ended (recording left running)", "unrelated side conversation". A side call
-usually shows as one voice talking to someone who is not in the room, about other work, while the
-meeting's voices disappear. Meetings and off-meeting stretches must not overlap. If the meeting simply
-continues after a short interruption, keep only the interruption out."""
+Task 3: off-meeting stretches. List every stretch of lines that is NOT part of a meeting. Give each a
+reason that starts with "Context switch: " followed by a short, generic, REDACTED description of what
+happened, with no names, companies, numbers or topics from that stretch, e.g. "Context switch: separate
+phone/Teams call", "Context switch: stepped out of the room", "Context switch: small talk before the
+meeting", "Context switch: after the meeting ended, recording left running", "Context switch: unrelated
+side conversation". A side call usually shows as one voice talking to someone who is not in the room,
+about other work, while the meeting's voices disappear. Meetings and off-meeting stretches must not
+overlap. If the meeting simply continues after a short interruption, keep only the interruption out."""
 
 
 class FusedSegment(BaseModel):
@@ -108,7 +110,7 @@ class Meeting(BaseModel):
 class OffMeeting(BaseModel):
     first_line: int
     last_line: int
-    reason: str = Field(description="a few words, e.g. recorder on a separate Teams call")
+    reason: str = Field(description='"Context switch: " + generic redacted event, e.g. separate phone/Teams call')
 
 
 class Analysis(BaseModel):

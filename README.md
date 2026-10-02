@@ -41,6 +41,10 @@ audio ─► ffmpeg enhance (gain first, mild denoise) ─► 10-min chunks, 30 
    estimate, transcribes, and opens `output\<file name>\transcript.md` when done. If it stops midway,
    drag it on again and reuse your answers: finished steps are cached.
 
+To skip the questions every time, put your usual options in a `defaults.txt` next to `transcribe.bat`
+(git-ignored, so client names stay on your PC), e.g.
+`--context "Bank group heads session" --keywords "Ahmed,core banking"`.
+
 Options still work from a terminal: `transcribe.bat "C:\path\to\file.m4a" --keywords "Ahmed,Sara"`.
 
 ## Setup

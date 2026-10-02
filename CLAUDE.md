@@ -73,7 +73,9 @@ per meeting. Built and tested in a cloud session on 2026-09-26; now runs locally
   `llm.analyze` returns `off_meeting` spans with a reason; `pipeline.mark_off_meeting` tags segments
   (`off_reason`). transcript.md/.txt hide them behind one-line markers, transcript_full.md keeps all.
   `--start/--end` trim the audio (own cache dir per start trim; timestamps shifted back to the original).
-  transcribe.bat asks for context, names/terms, end/start time and saves answers in run_options.txt.
+  transcribe.bat asks for context, names/terms, end/start time and saves answers in run_options.txt;
+  a git-ignored defaults.txt skips the questions. Off-meeting reasons are "Context switch: <generic,
+  redacted event>" by owner request (no names/topics from side calls).
 - Fragment folding uses min(15 s, 2% of all speech) so short recordings keep short real speakers;
   meeting participants are recounted after name resolution (it can split ids).
 - Client recordings are confidential: never commit transcripts or quote their content in the repo.
