@@ -120,6 +120,15 @@ Output goes to `output/<file name>/`:
 - Otherwise names come from the conversation ("Sara, aap batayein?" followed by a reply). Weak
   evidence stays `Guest N`, and the guess is shown in the speaker table.
 
+### Voice samples from an earlier recording
+
+Find a spot in a transcript where one person talks alone for 5-10 s and cut it:
+
+```bash
+minutesman clip recording.m4a 0:54 1:04 -o voices/raja.wav
+minutesman run next.m4a --voice "Raja=voices/raja.wav"
+```
+
 ### Fixing names afterwards
 
 The speaker table shows an id per speaker (S1, S2, ...). If you know who someone is, rerun with

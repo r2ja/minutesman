@@ -38,6 +38,13 @@ EFFORT_OUTPUT_FACTOR = {"none": 0.6, "low": 0.75, "medium": 1.0, "high": 1.6, "x
 
 
 # Projected cost from the measured token rates above
+def _seconds(text: str) -> float:
+    total = 0.0
+    for part in text.split(":"):
+        total = total * 60 + float(part)
+    return total
+
+
 def _renames(text: str | None) -> dict | None:
     if not text:
         return None
@@ -99,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
     sh.add_argument("-o", "--out", type=Path, help="default: <name>.small.ogg next to the input")
     sh.add_argument("--bitrate", default="32k")
 
+    cl = sub.add_parser("clip", help="cut a voice sample for --voice, e.g. clip rec.m4a 0:54 1:04 -o voices/raja.wav")
+    cl.add_argument("audio", type=Path)
+    cl.add_argument("start", help="mm:ss or h:mm:ss")
+    cl.add_argument("end", help="mm:ss or h:mm:ss")
+    cl.add_argument("-o", "--out", type=Path, required=True)
+
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
@@ -118,6 +131,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "check":
         return check(cfg)
+
+    if args.cmd == "clip":
+        a, b = _seconds(args.start), _seconds(args.end)
+        if not 2 <= b - a <= 30:
+            raise SystemExit("A voice sample should be 2-30 s of one person talking alone (5-10 s is ideal).")
+        audio.clip(args.audio, args.out, a, b)
+        print(f"Wrote {args.out} ({b - a:.0f} s). Use it with: --voice \"Name={args.out}\"")
+        return 0
 
     if args.cmd == "shrink":
         dst = args.out or args.audio.with_suffix(".small.ogg")
